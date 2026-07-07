@@ -119,7 +119,16 @@ impl DisagreementWorkspace {
             return Err(format!("No frames found in {}", trajectory.display()));
         }
 
-        let species = read_lammps_species(&run_dir.join("input.lmp"))?;
+        let species = match read_lammps_species(&run_dir.join("input.lmp")) {
+            Ok(species) => species,
+            Err(error) => {
+                eprintln!(
+                    " ⚠️  Could not read LAMMPS species for mock disagreement ({}); using fallback species.",
+                    error
+                );
+                fallback_species()
+            }
+        };
 
         let disagreement_dir = project_dir
             .join("disagreement")
@@ -398,7 +407,16 @@ fn read_lammps_dump(path: &Path) -> Result<Vec<DumpFrame>, String> {
 }
 
 fn create_mock_trajectory(data_path: &Path, trajectory_path: &Path) -> Result<(), String> {
-    let (bounds, atoms) = read_lammps_data(data_path)?;
+    let (bounds, atoms) = match read_lammps_data(data_path) {
+        Ok(data) => data,
+        Err(error) => {
+            eprintln!(
+                " ⚠️  Could not read LAMMPS data for mock trajectory ({}); using fallback mock atoms.",
+                error
+            );
+            fallback_lammps_data()
+        }
+    };
     let mut text = String::new();
 
     for frame_index in 0..11 {
@@ -441,6 +459,34 @@ fn create_mock_trajectory(data_path: &Path, trajectory_path: &Path) -> Result<()
             error
         )
     })
+}
+
+fn fallback_lammps_data() -> (BoxBounds, Vec<DumpAtom>) {
+    let bounds = BoxBounds {
+        xlo_bound: 0.0,
+        xhi_bound: 10.0,
+        ylo_bound: 0.0,
+        yhi_bound: 10.0,
+        zlo_bound: 0.0,
+        zhi_bound: 10.0,
+        xy: 0.0,
+        xz: 0.0,
+        yz: 0.0,
+    };
+
+    let atoms = (0..16)
+        .map(|index| DumpAtom {
+            id: index + 1,
+            atom_type: if index % 2 == 0 { 1 } else { 2 },
+            position: [
+                1.0 + (index % 4) as f64 * 2.0,
+                1.0 + ((index / 4) % 4) as f64 * 2.0,
+                5.0,
+            ],
+        })
+        .collect();
+
+    (bounds, atoms)
 }
 
 fn read_lammps_data(path: &Path) -> Result<(BoxBounds, Vec<DumpAtom>), String> {
@@ -743,6 +789,10 @@ fn read_lammps_species(input_lmp: &Path) -> Result<Vec<String>, String> {
         "Could not find a parseable 'pair_coeff * * ...' element mapping in {}",
         input_lmp.display()
     ))
+}
+
+fn fallback_species() -> Vec<String> {
+    vec!["S".to_string(), "Cu".to_string()]
 }
 
 fn symbol_from_token(token: &str) -> Result<String, String> {
