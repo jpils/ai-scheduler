@@ -1,3 +1,4 @@
+mod disagreement;
 mod install;
 mod job_template;
 mod lammps;
@@ -6,6 +7,7 @@ mod training;
 mod vasp;
 mod watcher;
 
+use disagreement::{DisagreementSettings, DisagreementWorkspace};
 use lammps::{LammpsManager, MdModelPackage};
 use paths::{pixi_python, scheduler_home};
 use serde::Deserialize;
@@ -19,6 +21,7 @@ struct Config {
     project: ProjectConfig,
     training: TrainingConfig,
     committee: CommitteeConfig,
+    disagreement: Option<DisagreementConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +43,13 @@ enum Backend {
 }
 
 impl Backend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Backend::Upet => "upet",
+            Backend::N2p2 => "n2p2",
+        }
+    }
+
     pub fn pixi_env(&self) -> &'static str {
         match self {
             Backend::Upet => "upet",
@@ -81,6 +91,37 @@ impl EnergyMode {
 #[derive(Debug, Deserialize)]
 struct CommitteeConfig {
     members: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct DisagreementConfig {
+    mode: Option<DisagreementMode>,
+    max_selected: Option<usize>,
+    min_rrmse: Option<f64>,
+    max_rrmse: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum DisagreementMode {
+    Mock,
+    Real,
+}
+
+impl DisagreementConfig {
+    fn mode(&self) -> DisagreementMode {
+        self.mode.unwrap_or(DisagreementMode::Mock)
+    }
+
+    fn settings(&self) -> DisagreementSettings {
+        let defaults = DisagreementSettings::default();
+
+        DisagreementSettings {
+            max_selected: self.max_selected.unwrap_or(defaults.max_selected),
+            min_rrmse: self.min_rrmse.unwrap_or(defaults.min_rrmse),
+            max_rrmse: self.max_rrmse.unwrap_or(defaults.max_rrmse),
+        }
+    }
 }
 
 fn prepare_training_dataset(
@@ -194,6 +235,19 @@ fn main() {
                 return;
             }
         }
+
+        let disagreement_template = setup_dir
+            .join("jobscripts")
+            .join("upet_disagreement.sh.template");
+
+        if !disagreement_template.is_file() {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!(
+                "Missing UPET disagreement template: {}",
+                disagreement_template.display()
+            );
+            return;
+        }
     }
 
     if matches!(config.training.backend, Backend::N2p2) {
@@ -213,6 +267,19 @@ fn main() {
                 eprintln!("Missing n2p2 setup file: {}", path.display());
                 return;
             }
+        }
+
+        let disagreement_template = setup_dir
+            .join("jobscripts")
+            .join("n2p2_disagreement.sh.template");
+
+        if !disagreement_template.is_file() {
+            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+            eprintln!(
+                "Missing n2p2 disagreement template: {}",
+                disagreement_template.display()
+            );
+            return;
         }
     }
 
@@ -485,7 +552,7 @@ fn main() {
             gen_num,
             config.committee.members,
             match config.training.backend {
-                Backend::Upet => Some(MdModelPackage::UpetMock),
+                Backend::Upet => Some(MdModelPackage::UpetModel),
                 Backend::N2p2 => Some(MdModelPackage::N2p2Inputs),
             },
         ) {
@@ -509,11 +576,69 @@ fn main() {
             .join("selected_structures")
             .join(format!("generation_{}.xyz", gen_num));
 
+        let disagreement_settings = config
+            .disagreement
+            .as_ref()
+            .map(DisagreementConfig::settings)
+            .unwrap_or_default();
+
+        println!(" 🔎 Preparing committee disagreement evaluation...");
+
+        let disagreement_mode = config
+            .disagreement
+            .as_ref()
+            .map(DisagreementConfig::mode)
+            .unwrap_or(DisagreementMode::Mock);
+
+        match disagreement_mode {
+            DisagreementMode::Mock => match DisagreementWorkspace::evaluate_mock(
+                &project_dir,
+                gen_num,
+                config.training.backend.as_str(),
+                config.committee.members,
+                disagreement_settings,
+            ) {
+                Ok(result) => {
+                    println!(
+                        " ✓ Mock disagreement selected {} structures.",
+                        result.selected_count
+                    );
+                    println!(" ✓ Disagreement scores: {:?}", result.scores_path);
+                    println!(" ✓ Selected structures: {:?}", result.selected_path);
+                }
+                Err(error) => {
+                    eprintln!(" ❌ Mock disagreement evaluation failed: {}", error);
+                    return;
+                }
+            },
+
+            DisagreementMode::Real => {
+                match DisagreementWorkspace::create_real_job_script(
+                    &project_dir,
+                    &setup_dir,
+                    gen_num,
+                    config.training.backend.as_str(),
+                    disagreement_settings,
+                ) {
+                    Ok(disagreement_script) => {
+                        println!(" 🚀 [Dry-Run] sbatch {:?}", disagreement_script);
+                    }
+                    Err(error) => {
+                        eprintln!(" ❌ Failed to prepare disagreement evaluation: {}", error);
+                        return;
+                    }
+                }
+            }
+        }
+
         if !selected_structures.is_file() {
             println!(
-                " ⚠️  Generation {} Halted: selected structures file not found: {}",
+                " ⚠️  Generation {} Halted: selected structures file not found after disagreement job setup: {}",
                 gen_num,
                 selected_structures.display()
+            );
+            println!(
+                "    Submit the disagreement job, wait for it to finish, then rerun the workflow."
             );
             return;
         }

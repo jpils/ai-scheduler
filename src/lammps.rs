@@ -6,7 +6,7 @@ pub struct LammpsManager;
 
 #[derive(Clone, Copy)]
 pub enum MdModelPackage {
-    UpetMock,
+    UpetModel,
     N2p2Inputs,
 }
 
@@ -158,7 +158,7 @@ impl LammpsManager {
             let member_package_dir = committee_models_dir.join(&member_name);
 
             match model_package {
-                Some(MdModelPackage::UpetMock) => {
+                Some(MdModelPackage::UpetModel) => {
                     fs::create_dir_all(&member_package_dir).map_err(|e| {
                         format!(
                             "Failed to create UPET model package directory {}: {}",
@@ -167,23 +167,35 @@ impl LammpsManager {
                         )
                     })?;
 
+                    let real_model = model_dir.join("model.pt");
                     let mock_model = model_dir.join("mock_trained_model.pt");
-
-                    if !mock_model.is_file() {
+                    let source_model = if real_model.is_file() {
+                        real_model
+                    } else if mock_model.is_file() {
+                        mock_model
+                    } else {
                         return Err(format!(
-                            "Required mock UPET model is missing: {}",
+                            "Required UPET model is missing. Expected one of: {}, {}",
+                            real_model.display(),
                             mock_model.display()
                         ));
+                    };
+
+                    let stale_mock_package = member_package_dir.join("mock_trained_model.pt");
+                    if stale_mock_package.is_file() {
+                        fs::remove_file(&stale_mock_package).map_err(|e| {
+                            format!(
+                                "Failed to remove stale UPET model package {}: {}",
+                                stale_mock_package.display(),
+                                e
+                            )
+                        })?;
                     }
 
-                    fs::copy(
-                        &mock_model,
-                        member_package_dir.join("mock_trained_model.pt"),
-                    )
-                    .map_err(|e| {
+                    fs::copy(&source_model, member_package_dir.join("model.pt")).map_err(|e| {
                         format!(
                             "Failed to copy {} into {}: {}",
-                            mock_model.display(),
+                            source_model.display(),
                             member_package_dir.display(),
                             e
                         )
