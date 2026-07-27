@@ -5,13 +5,13 @@ use std::path::PathBuf;
 /// Returns the installation directory.
 ///
 /// Linux:
-/// ~/.local/share/ai-scheduler
+/// ~/.local/share/alchemist
 pub fn install_dir() -> io::Result<PathBuf> {
     let base = dirs::data_local_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::Other, "Could not determine data directory")
     })?;
 
-    Ok(base.join("ai-scheduler"))
+    Ok(base.join("alchemist"))
 }
 
 fn copy_file(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
@@ -75,7 +75,7 @@ fn repository_root() -> io::Result<PathBuf> {
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        "Could not locate ai-scheduler repository.",
+        "Could not locate ALCHEMIST repository.",
     ))
 }
 
@@ -104,7 +104,7 @@ pub fn initialize() -> io::Result<()> {
 
     println!("✓ Python resources copied.");
     println!("✓ Initialization complete.");
-    println!("You can now run `ai_scheduler` from any project directory.");
+    println!("You can now run `alchemist` from any project directory.");
 
     Ok(())
 }

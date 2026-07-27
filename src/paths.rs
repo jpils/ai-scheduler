@@ -5,7 +5,7 @@ use std::process::Command;
 fn repository_root() -> Result<PathBuf, Box<dyn Error>> {
     let mut dir = std::env::current_exe()?;
 
-    // target/debug/ai_scheduler -> target/debug
+    // target/debug/alchemist -> target/debug
     dir.pop();
 
     loop {
@@ -21,18 +21,18 @@ fn repository_root() -> Result<PathBuf, Box<dyn Error>> {
         }
     }
 
-    Err("Could not locate the ai-scheduler repository.".into())
+    Err("Could not locate the ALCHEMIST repository.".into())
 }
 
 fn installed_home() -> Result<PathBuf, Box<dyn Error>> {
     let base = dirs::data_local_dir().ok_or("Could not determine local data directory")?;
 
-    let scheduler = base.join("ai-scheduler");
+    let scheduler = base.join("alchemist");
 
     if scheduler.exists() {
         Ok(scheduler)
     } else {
-        Err("ai-scheduler is not initialized.\nRun `cargo run -- init` first.".into())
+        Err("ALCHEMIST is not initialized.\nRun `cargo run -- init` first.".into())
     }
 }
 
