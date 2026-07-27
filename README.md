@@ -21,7 +21,7 @@ cargo install --path .
 
 cargo run -- init
 
-alchemsit
+alchemist
 
 ## Configuration
 
