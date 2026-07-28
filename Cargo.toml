@@ -7,3 +7,7 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
+anyhow = "1.0.103"
+strum = "0.28.0"
+strum_macros = "0.28.0"
+tempfile = "3"
