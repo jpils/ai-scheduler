@@ -76,13 +76,23 @@ impl TrainingWorkspace {
             )
         })?;
 
-        let checkpoint_string = absolute_path_string(checkpoint)?;
+        let checkpoint_name = checkpoint
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "Could not determine checkpoint file name from {}",
+                    checkpoint.display()
+                )
+            })?;
 
-        let train_string = absolute_path_string(&train_set)?;
+        let checkpoint_string = format!("../../../../setup/training/{checkpoint_name}");
 
-        let validation_string = absolute_path_string(&validation_set)?;
+        let train_string = "../../dataset/train.extxyz".to_string();
 
-        let test_string = absolute_path_string(&test_set)?;
+        let validation_string = "../../dataset/validation.extxyz".to_string();
+
+        let test_string = "../../dataset/test.extxyz".to_string();
 
         for member_index in 0..committee_members {
             let member_dir = models_dir.join(format!("member_{member_index:03}"));
@@ -622,18 +632,6 @@ impl TrainingWorkspace {
 
         Ok(())
     }
-}
-
-fn absolute_path_string(path: &Path) -> Result<String, String> {
-    let absolute = path.canonicalize().map_err(|error| {
-        format!(
-            "Failed to resolve absolute path {}: {}",
-            path.display(),
-            error
-        )
-    })?;
-
-    Ok(absolute.display().to_string())
 }
 
 fn parse_n2p2_training_memory_mib(log_text: &str) -> Option<f64> {
