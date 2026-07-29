@@ -205,17 +205,6 @@ impl DisagreementWorkspace {
             )
         })?;
 
-        let trajectory = project_dir
-            .join("md_runs")
-            .join(format!("generation_{generation}"))
-            .join("run_000")
-            .join("traj.dump");
-
-        let committee_models = project_dir
-            .join("md_runs")
-            .join(format!("generation_{generation}"))
-            .join("committee_models");
-
         let selected_structures = project_dir
             .join("selected_structures")
             .join(format!("generation_{generation}.xyz"));
@@ -242,6 +231,16 @@ impl DisagreementWorkspace {
             ));
         }
 
+        let staged_python_script = generation_dir.join("committee_disagreement.py");
+        fs::copy(&python_script, &staged_python_script).map_err(|error| {
+            format!(
+                "Failed to stage disagreement Python script {} into {}: {}",
+                python_script.display(),
+                staged_python_script.display(),
+                error
+            )
+        })?;
+
         let template_path = setup_dir
             .join("jobscripts")
             .join(format!("{backend}_disagreement.sh.template"));
@@ -260,14 +259,26 @@ impl DisagreementWorkspace {
             &script_path,
             &[
                 ("generation", generation.to_string()),
-                ("project_dir", absolute_path_string(project_dir)?),
-                ("python_script", absolute_path_string(&python_script)?),
-                ("trajectory", absolute_path_string(&trajectory)?),
-                ("committee_models", absolute_path_string(&committee_models)?),
-                ("output_dir", absolute_path_string(&generation_dir)?),
+                ("project_dir", "../..".to_string()),
+                (
+                    "python_script",
+                    format!("disagreement/generation_{generation}/committee_disagreement.py"),
+                ),
+                (
+                    "trajectory",
+                    format!("md_runs/generation_{generation}/run_000/traj.dump"),
+                ),
+                (
+                    "committee_models",
+                    format!("md_runs/generation_{generation}/committee_models"),
+                ),
+                (
+                    "output_dir",
+                    format!("disagreement/generation_{generation}"),
+                ),
                 (
                     "selected_structures",
-                    absolute_path_string(&selected_structures)?,
+                    format!("selected_structures/generation_{generation}.xyz"),
                 ),
                 ("max_selected", settings.max_selected.to_string()),
                 ("min_rrmse", settings.min_rrmse.to_string()),
@@ -775,27 +786,6 @@ fn species_for_type(atom_type: usize, species: &[String]) -> Result<&str, String
                 species.join(", ")
             )
         })
-}
-
-fn absolute_path_string(path: &Path) -> Result<String, String> {
-    if path.exists() {
-        return path
-            .canonicalize()
-            .map_err(|error| format!("Failed to resolve {}: {}", path.display(), error))
-            .map(|path| path.to_string_lossy().into_owned());
-    }
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("Path has no parent: {}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("Path has no file name: {}", path.display()))?;
-    let parent = parent
-        .canonicalize()
-        .map_err(|error| format!("Failed to resolve {}: {}", parent.display(), error))?;
-
-    Ok(parent.join(file_name).to_string_lossy().into_owned())
 }
 
 #[cfg(unix)]
