@@ -112,7 +112,7 @@ impl DisagreementConfig {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() > 1 && args[1] == "init" {
+    if args.len() > 1 && matches!(args[1].as_str(), "init" | "--init") {
         if let Err(e) = install::initialize() {
             eprintln!("❌ {}", e);
         }

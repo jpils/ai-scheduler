@@ -1,17 +1,15 @@
+use crate::paths::default_installed_home;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
 /// Returns the installation directory.
 ///
-/// Linux:
-/// ~/.local/share/alchemist
+/// Uses ALCHEMIST_HOME when set, otherwise falls back to the platform data
+/// directory, e.g. ~/.local/share/alchemist on Linux.
 pub fn install_dir() -> io::Result<PathBuf> {
-    let base = dirs::data_local_dir().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Other, "Could not determine data directory")
-    })?;
-
-    Ok(base.join("alchemist"))
+    default_installed_home()
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))
 }
 
 fn copy_file(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
@@ -56,9 +54,20 @@ fn copy_directory(from: &std::path::Path, to: &std::path::Path) -> io::Result<()
 }
 
 fn repository_root() -> io::Result<PathBuf> {
-    let mut dir = std::env::current_exe()?;
+    if let Ok(repository) = find_repository_from(std::env::current_dir()?) {
+        return Ok(repository);
+    }
 
-    dir.pop();
+    let mut exe_dir = std::env::current_exe()?;
+    exe_dir.pop();
+
+    find_repository_from(exe_dir)
+}
+
+fn find_repository_from(mut dir: PathBuf) -> io::Result<PathBuf> {
+    if dir.is_file() {
+        dir.pop();
+    }
 
     loop {
         if dir.join("Cargo.toml").exists()
@@ -75,7 +84,7 @@ fn repository_root() -> io::Result<PathBuf> {
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        "Could not locate ALCHEMIST repository.",
+        "Could not locate ALCHEMIST repository. Run `alchemist --init` from the cloned repository.",
     ))
 }
 
