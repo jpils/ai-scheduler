@@ -240,16 +240,6 @@ impl DisagreementWorkspace {
             ));
         }
 
-        let staged_python_script = generation_dir.join("committee_disagreement.py");
-        fs::copy(&python_script, &staged_python_script).map_err(|error| {
-            format!(
-                "Failed to stage disagreement Python script {} into {}: {}",
-                python_script.display(),
-                staged_python_script.display(),
-                error
-            )
-        })?;
-
         let template_path = setup_dir
             .join("jobscripts")
             .join(format!("{backend}_disagreement.sh.template"));
@@ -269,10 +259,7 @@ impl DisagreementWorkspace {
             &[
                 ("generation", generation.to_string()),
                 ("project_dir", "../..".to_string()),
-                (
-                    "python_script",
-                    format!("disagreement/generation_{generation}/committee_disagreement.py"),
-                ),
+                ("python_script", python_script.display().to_string()),
                 (
                     "trajectory",
                     format!("md_runs/generation_{generation}/run_000/traj.dump"),

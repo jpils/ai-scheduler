@@ -239,8 +239,9 @@ impl PipelineStep for MdStep {
         )))
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+        validate_md_outputs(&pipeline_ctx.project_dir, pipeline_ctx.generation)
     }
 }
 
@@ -350,8 +351,9 @@ impl PipelineStep for DftStep {
         Ok(StepPlan::Slurm(JobScript::new(job_script)))
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+        validate_vasp_outputs(pipeline_ctx)
     }
 }
 
@@ -626,7 +628,12 @@ impl PipelineStep for TrainingStep {
                     .map_err(|error| anyhow!(error))?;
                 }
 
-                Ok(())
+                validate_upet_training_outputs(
+                    &pipeline_ctx.project_dir,
+                    pipeline_ctx.generation,
+                    self.committee_members,
+                    pipeline_ctx.dry_run,
+                )
             }
 
             ModelBackend::N2p2 => {
@@ -644,7 +651,13 @@ impl PipelineStep for TrainingStep {
                     pipeline_ctx.generation,
                     self.committee_members,
                 )
-                .map_err(|error| anyhow!(error))
+                .map_err(|error| anyhow!(error))?;
+
+                validate_n2p2_training_outputs(
+                    &pipeline_ctx.project_dir,
+                    pipeline_ctx.generation,
+                    self.committee_members,
+                )
             }
         }
     }
@@ -742,8 +755,9 @@ impl PipelineStep for QbcStep {
         }
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+        validate_disagreement_outputs(&pipeline_ctx.project_dir, pipeline_ctx.generation)
     }
 }
 
@@ -853,6 +867,177 @@ fn ensure_completed(job_state: &FinishedData) -> Result<()> {
             "job finished with non-completed status: {status:?}"
         )),
     }
+}
+
+fn validate_upet_training_outputs(
+    project_dir: &Path,
+    generation: u32,
+    committee_members: usize,
+    dry_run: bool,
+) -> Result<()> {
+    for member_index in 0..committee_members {
+        let member_dir = project_dir
+            .join("training")
+            .join(format!("generation_{generation}"))
+            .join("models")
+            .join(format!("member_{member_index:03}"));
+        let model = member_dir.join("model.pt");
+
+        if dry_run {
+            let mock_model = member_dir.join("mock_trained_model.pt");
+            if model.is_file() {
+                require_nonempty_file(&model, "UPET trained model")?;
+            } else {
+                require_nonempty_file(&mock_model, "mock UPET trained model")?;
+            }
+        } else {
+            require_nonempty_file(&model, "UPET trained model")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_n2p2_training_outputs(
+    project_dir: &Path,
+    generation: u32,
+    committee_members: usize,
+) -> Result<()> {
+    for member_index in 0..committee_members {
+        let member_dir = project_dir
+            .join("training")
+            .join(format!("generation_{generation}"))
+            .join("models")
+            .join(format!("member_{member_index:03}"));
+
+        for file_name in [
+            "input.data",
+            "input.nn",
+            "scaling.data",
+            "selected_epoch.txt",
+        ] {
+            require_nonempty_file(&member_dir.join(file_name), "n2p2 selected model file")?;
+        }
+
+        let mut weights_count = 0usize;
+        for entry in std::fs::read_dir(&member_dir)
+            .map_err(|error| anyhow!("failed to read {}: {}", member_dir.display(), error))?
+        {
+            let entry = entry.map_err(|error| {
+                anyhow!("failed to inspect {}: {}", member_dir.display(), error)
+            })?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if file_name.starts_with("weights.") && file_name.ends_with(".data") {
+                require_nonempty_file(&path, "n2p2 selected weight file")?;
+                weights_count += 1;
+            }
+        }
+
+        if weights_count == 0 {
+            return Err(anyhow!(
+                "n2p2 selected weights are missing in {}",
+                member_dir.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_md_outputs(project_dir: &Path, generation: u32) -> Result<()> {
+    let run_dir = project_dir
+        .join("md_runs")
+        .join(format!("generation_{generation}"))
+        .join("run_000");
+
+    require_nonempty_file(&run_dir.join("traj.dump"), "LAMMPS trajectory")
+}
+
+fn validate_disagreement_outputs(project_dir: &Path, generation: u32) -> Result<()> {
+    let disagreement_dir = project_dir
+        .join("disagreement")
+        .join(format!("generation_{generation}"));
+    let selected = project_dir
+        .join("selected_structures")
+        .join(format!("generation_{generation}.xyz"));
+
+    require_nonempty_file(&disagreement_dir.join("scores.csv"), "disagreement scores")?;
+    require_nonempty_file(
+        &disagreement_dir.join("selected.xyz"),
+        "selected structures",
+    )?;
+    require_nonempty_file(&selected, "exported selected structures")
+}
+
+fn validate_vasp_outputs(pipeline_ctx: &PipelineCtx) -> Result<()> {
+    let selected_structures = pipeline_ctx
+        .project_dir
+        .join("selected_structures")
+        .join(format!("generation_{}.xyz", pipeline_ctx.generation));
+    let selected_structures = if selected_structures.is_file() {
+        selected_structures
+    } else if pipeline_ctx.dry_run {
+        dry_seed_dataset(&pipeline_ctx.project_dir)?
+    } else {
+        return Err(anyhow!(
+            "selected structures file not found for VASP validation: {}",
+            selected_structures.display()
+        ));
+    };
+
+    let count = VaspWorkspace::get_configuration_count(&selected_structures)?;
+    let count = pipeline_ctx
+        .dry_config_limit
+        .map_or(count, |limit| count.min(limit));
+    let generation_dir = pipeline_ctx
+        .project_dir
+        .join("vasp_runs")
+        .join(format!("generation_{}", pipeline_ctx.generation));
+
+    for config_index in 0..count {
+        let outcar = generation_dir
+            .join(format!("config_{config_index:03}"))
+            .join("OUTCAR");
+        require_nonempty_file(&outcar, "VASP OUTCAR")?;
+
+        let text = std::fs::read_to_string(&outcar)
+            .map_err(|error| anyhow!("failed to read {}: {}", outcar.display(), error))?;
+        for marker in [
+            "POSITION",
+            "TOTAL-FORCES",
+            "free  energy   TOTEN",
+            "General timing and accounting",
+        ] {
+            if !text.contains(marker) {
+                return Err(anyhow!(
+                    "VASP OUTCAR {} is missing marker {:?}",
+                    outcar.display(),
+                    marker
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn require_nonempty_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| anyhow!("missing {} {}: {}", label, path.display(), error))?;
+
+    if !metadata.is_file() {
+        return Err(anyhow!("{} is not a file: {}", label, path.display()));
+    }
+
+    if metadata.len() == 0 {
+        return Err(anyhow!("{} is empty: {}", label, path.display()));
+    }
+
+    Ok(())
 }
 
 fn parse_command() -> Result<Command> {
