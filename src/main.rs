@@ -34,6 +34,9 @@ use pipeline::{
     TrainingStep,
 };
 use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
+use tokio::main;
+
+use crate::pipeline::runner::RunnerKind;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -118,7 +121,8 @@ impl DisagreementConfig {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "init" {
@@ -371,11 +375,11 @@ fn main() {
         .map(|execution| execution.runner)
         .unwrap_or(ExecutionRunner::Slurm);
 
-    let runner: Box<dyn Runner> = match runner_mode {
-        ExecutionRunner::Slurm => Box::new(SlurmRunner),
-        ExecutionRunner::Local => Box::new(LocalRunner),
+    let runner: RunnerKind = match runner_mode {
+        ExecutionRunner::Slurm => RunnerKind::Slurm(SlurmRunner),
+        ExecutionRunner::Local => RunnerKind::Local(LocalRunner),
         ExecutionRunner::DryRun => match DryRunner::new(&project_dir) {
-            Ok(runner) => Box::new(runner),
+            Ok(runner) => RunnerKind::Dry(runner),
             Err(error) => {
                 eprintln!(" ❌ Failed to initialize dry runner: {}", error);
                 return;
@@ -465,7 +469,13 @@ fn main() {
             dry_config_limit: None,
         };
 
-        if let Err(error) = runner.run(&pipeline, &pipeline_ctx) {
+        let run_result = match &runner {
+            RunnerKind::Slurm(runner) => runner.run(&pipeline, &pipeline_ctx).await,
+            RunnerKind::Local(runner) => runner.run(&pipeline, &pipeline_ctx).await,
+            RunnerKind::Dry(runner) => runner.run(&pipeline, &pipeline_ctx).await,
+        };
+
+        if let Err(error) = run_result {
             eprintln!(" ❌ Generation {} failed: {}", gen_num, error);
             return;
         }

@@ -14,20 +14,27 @@ use crate::{
 use super::{Pipeline, PipelineCtx};
 
 pub(crate) trait Runner {
-    fn run(&self, pipeline: &Pipeline, pipeline_ctx: &PipelineCtx) -> Result<()> {
+    async fn run(&self, pipeline: &Pipeline, pipeline_ctx: &PipelineCtx) -> Result<()> {
         for step in pipeline.steps.iter() {
-            self.run_step(step.as_ref(), pipeline_ctx)?;
+            self.run_step(step.as_ref(), pipeline_ctx).await?;
         }
         Ok(())
     }
 
-    fn run_step(&self, pipeline_step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()>;
+    async fn run_step(&self, pipeline_step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()>;
 }
 
+pub(crate) enum RunnerKind {
+    Slurm(SlurmRunner),
+    Local(LocalRunner),
+    Dry(DryRunner)
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct SlurmRunner;
 
 impl Runner for SlurmRunner {
-    fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
+    async fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
         step.validate_required_files(pipeline_ctx)?;
 
         let StepPlan::Slurm(job_script) = step.prepare(pipeline_ctx)? else {
@@ -37,11 +44,11 @@ impl Runner for SlurmRunner {
             ));
         };
 
-        let mut job_id = slurm_client::submit(&job_script)?;
+        let mut job_id = slurm_client::submit(&job_script).await?;
         let mut retry_count = 0;
 
         loop {
-            let finished_data = wait_for_job(&job_id, pipeline_ctx.poll_interval)?;
+            let finished_data = wait_for_job(&job_id, pipeline_ctx.poll_interval).await?;
 
             match finished_data.final_status {
                 FinalJobStatus::Completed => {
@@ -72,35 +79,38 @@ impl Runner for SlurmRunner {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct LocalRunner;
 
 impl Runner for LocalRunner {
-    fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
-        step.validate_required_files(pipeline_ctx)?;
+    async fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        //step.validate_required_files(pipeline_ctx)?;
 
-        match step.prepare(pipeline_ctx)? {
-            StepPlan::LocalComplete => {
-                let finished_data =
-                    synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
-                step.on_completion(&finished_data, pipeline_ctx)
-            }
-            StepPlan::Slurm(_) => Err(anyhow!(
-                "{} cannot run with LocalRunner: step requires Slurm",
-                step.name()
-            )),
-        }
+        //match step.prepare(pipeline_ctx)? {
+        //    StepPlan::LocalComplete => {
+        //        let finished_data =
+        //            synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
+        //        step.on_completion(&finished_data, pipeline_ctx)
+        //    }
+        //    StepPlan::Slurm(_) => Err(anyhow!(
+        //        "{} cannot run with LocalRunner: step requires Slurm",
+        //        step.name()
+        //    )),
+        //}
+        unimplemented!()
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct TestRunner;
 
 impl Runner for TestRunner {
-    fn run_step(
+    async fn run_step(
         &self,
         _pipeline_step: &dyn PipelineStep,
         _pipeline_ctx: &PipelineCtx,
     ) -> Result<()> {
-        todo!()
+        unimplemented!()
     }
 }
 
@@ -128,7 +138,7 @@ impl DryRunner {
 }
 
 impl Runner for DryRunner {
-    fn run(&self, pipeline: &Pipeline, pipeline_ctx: &PipelineCtx) -> Result<()> {
+    async fn run(&self, pipeline: &Pipeline, pipeline_ctx: &PipelineCtx) -> Result<()> {
         let dry_ctx = PipelineCtx {
             project_dir: self.temp_project_dir.clone(),
             generation: pipeline_ctx.generation,
@@ -139,13 +149,13 @@ impl Runner for DryRunner {
         };
 
         for step in pipeline.steps.iter() {
-            self.run_step(step.as_ref(), &dry_ctx)?;
+            self.run_step(step.as_ref(), &dry_ctx).await?;
         }
 
         Ok(())
     }
 
-    fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
+    async fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
         println!("[DryRun] preparing {}", step.describe());
 
         step.validate_required_files(pipeline_ctx)?;
@@ -264,28 +274,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn slurm_runner_rejects_local_complete_steps() {
+    #[tokio::test]
+    async fn slurm_runner_rejects_local_complete_steps() {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp_dir.path().to_path_buf());
         let step = FakeStep {
             plan: FakePlan::LocalComplete,
         };
 
-        let error = SlurmRunner.run_step(&step, &ctx).unwrap_err().to_string();
+        let error = SlurmRunner.run_step(&step, &ctx).await.unwrap_err().to_string();
 
         assert!(error.contains("cannot run with SlurmRunner"));
     }
 
-    #[test]
-    fn local_runner_rejects_slurm_steps() {
+    #[tokio::test]
+    async fn local_runner_rejects_slurm_steps() {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp_dir.path().to_path_buf());
         let step = FakeStep {
             plan: FakePlan::Slurm,
         };
 
-        let error = LocalRunner.run_step(&step, &ctx).unwrap_err().to_string();
+        let error = LocalRunner.run_step(&step, &ctx).await.unwrap_err().to_string();
 
         assert!(error.contains("cannot run with LocalRunner"));
     }

@@ -1,15 +1,17 @@
 use crate::types::{FinalJobStatus, JobId, JobScript, JobState, PendingData, RunningData, FinishedData};
 
 use std::default;
-use std::process::{Command, Output};
+use std::process::Output;
+use tokio::process::Command;
 use std::path::PathBuf;
 use anyhow::{Context, Ok, Result, anyhow};
 
-pub(crate) fn submit(job_script: &JobScript) -> Result<JobId> {
+pub(crate) async fn submit(job_script: &JobScript) -> Result<JobId> {
     let sbatch_output = Command::new("sbatch")
         .arg("--parsable")
         .arg(job_script.as_path())
         .output()
+        .await
         .with_context(|| {
             format!(
                 "failed to execute sbatch for {}; is Slurm installed and on PATH?",
@@ -30,13 +32,13 @@ pub(crate) fn submit(job_script: &JobScript) -> Result<JobId> {
     JobId::new(output)
 }
 
-pub(crate) fn query_state(job_id: &JobId) -> Result<JobState> {
-    let queue_state = get_queue_state(job_id)?;
+pub(crate) async fn query_state(job_id: &JobId) -> Result<JobState> {
+    let queue_state = get_queue_state(job_id).await?;
 
     match queue_state {
-        QueueState::Pending => query_pending(job_id),
-        QueueState::Running => query_running(job_id),
-        QueueState::NotInQueue => query_finished(job_id),
+        QueueState::Pending => query_pending(job_id).await,
+        QueueState::Running => query_running(job_id).await,
+        QueueState::NotInQueue => query_finished(job_id).await,
         QueueState::Other(s) => { return Err(anyhow!("unsupported queue state {s}")) },
         QueueState::Unknown => { return Err(anyhow!("queue state was not polled")) },
     }
@@ -63,14 +65,15 @@ impl From<&str> for QueueState {
     }
 }
 
-fn query_pending(job_id: &JobId) -> Result<JobState> {
+async fn query_pending(job_id: &JobId) -> Result<JobState> {
     let query_out = Command::new("squeue")
         .arg("-h")
         .arg("-j")
         .arg(job_id.as_str())
         .arg("-o")
         .arg("%V|%o")
-        .output()?;
+        .output()
+        .await?;
 
     if !query_out.status.success() {
         return Err(anyhow!("pending query failed"));
@@ -91,14 +94,15 @@ fn query_pending(job_id: &JobId) -> Result<JobState> {
     Ok(JobState::Pending(pending_data))
 }
 
-fn query_running(job_id: &JobId) -> Result<JobState> {
+async fn query_running(job_id: &JobId) -> Result<JobState> {
     let query_out = Command::new("squeue")
         .arg("-h")
         .arg("-j")
         .arg(job_id.as_str())
         .arg("-o")
         .arg("%V|%o|%N|%M")
-        .output()?;
+        .output()
+        .await?;
 
     if !query_out.status.success() {
         return Err(anyhow!("running query failed"));
@@ -126,7 +130,7 @@ fn query_running(job_id: &JobId) -> Result<JobState> {
     Ok(JobState::Running(running_data))
 }
 
-fn query_finished(job_id: &JobId) -> Result<JobState> {
+async fn query_finished(job_id: &JobId) -> Result<JobState> {
     let query_out = Command::new("sacct")
         .arg("-n")
         .arg("-P")
@@ -134,7 +138,8 @@ fn query_finished(job_id: &JobId) -> Result<JobState> {
         .arg("-j")
         .arg(job_id.as_str())
         .arg("--format=Start,End,Elapsed,State,SubmitLine")
-        .output()?;
+        .output()
+        .await?;
 
     if !query_out.status.success() {
         return Err(anyhow!("finished query failed"));
@@ -174,14 +179,15 @@ fn query_finished(job_id: &JobId) -> Result<JobState> {
     Ok(JobState::Finished(finished_data))
 }
 
-fn get_queue_state(job_id: &JobId) -> Result<QueueState> {
+async fn get_queue_state(job_id: &JobId) -> Result<QueueState> {
     let query_out = Command::new("squeue")
         .arg("-h")
         .arg("-j")
         .arg(job_id.as_str())
         .arg("-o")
         .arg("%T")
-        .output()?;
+        .output()
+        .await?;
 
     let query_out_str = String::from_utf8_lossy(&query_out.stdout);
 
@@ -241,38 +247,38 @@ mod tests {
         assert_eq!(test_job_id().as_str(), "12345");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "requires a real pending Slurm job id in SLURM_TEST_JOB_ID"]
-    fn queries_pending_job() {
+    async fn queries_pending_job() {
         let job_id = slurm_test_job_id();
-        let state = query_pending(&job_id).unwrap();
+        let state = query_pending(&job_id).await.unwrap();
 
         assert!(matches!(state, JobState::Pending { .. }));
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "requires a real running Slurm job id in SLURM_TEST_JOB_ID"]
-    fn queries_running_job() {
+    async fn queries_running_job() {
         let job_id = slurm_test_job_id();
-        let state = query_running(&job_id).unwrap();
+        let state = query_running(&job_id).await.unwrap();
 
         assert!(matches!(state, JobState::Running { .. }));
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "requires a real finished Slurm job id in SLURM_TEST_JOB_ID"]
-    fn queries_finished_job() {
+    async fn queries_finished_job() {
         let job_id = slurm_test_job_id();
-        let state = query_finished(&job_id).unwrap();
+        let state = query_finished(&job_id).await.unwrap();
 
         assert!(matches!(state, JobState::Finished { .. }));
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "requires a real Slurm job id in SLURM_TEST_JOB_ID"]
-    fn queries_job_state() {
+    async fn queries_job_state() {
         let job_id = slurm_test_job_id();
-        let state = query_state(&job_id).unwrap();
+        let state = query_state(&job_id).await.unwrap();
 
         assert!(matches!(
             state,

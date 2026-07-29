@@ -11,3 +11,4 @@ anyhow = "1.0.103"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 tempfile = "3"
+tokio = { version = "1.53.1", features = ["full"] }
