@@ -4,7 +4,6 @@ use crate::{
     disagreement::{DisagreementSettings, DisagreementWorkspace},
     lammps::{LammpsManager, MdModelPackage},
     paths::{pixi_python, scheduler_home},
-    slurm_client,
     training::TrainingWorkspace,
     types::{FinalJobStatus, FinishedData, JobId, JobScript},
     vasp::VaspWorkspace,
@@ -17,11 +16,6 @@ pub(crate) enum StepPlan {
     LocalComplete,
 }
 
-pub(crate) enum StepSubmission {
-    Slurm(JobId),
-    LocalComplete,
-}
-
 pub(crate) trait PipelineStep {
     fn name(&self) -> &str;
     fn validate_required_files(&self, pipeline_ctx: &PipelineCtx) -> Result<()> {
@@ -30,12 +24,6 @@ pub(crate) trait PipelineStep {
     }
 
     fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan>;
-    fn submit(&self, pipeline_ctx: &PipelineCtx) -> Result<StepSubmission> {
-        match self.prepare(pipeline_ctx)? {
-            StepPlan::Slurm(job_script) => slurm_client::submit(&job_script).map(StepSubmission::Slurm),
-            StepPlan::LocalComplete => Ok(StepSubmission::LocalComplete),
-        }
-    }
     fn resubmit_from_current_state(&self) -> Result<JobId> {
         Err(anyhow!("{} does not support resubmission", self.name()))
     }

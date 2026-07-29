@@ -1,8 +1,12 @@
 use anyhow::{anyhow, Result};
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    pipeline::{PipelineStep, StepPlan, StepSubmission},
+    pipeline::{PipelineStep, StepPlan},
+    slurm_client,
     types::{FinalJobStatus, FinishedData, JobId, JobScript},
     watcher::wait_for_job,
 };
@@ -24,13 +28,16 @@ pub(crate) struct SlurmRunner;
 
 impl Runner for SlurmRunner {
     fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
-        let mut job_id = match step.submit(pipeline_ctx)? {
-            StepSubmission::Slurm(job_id) => job_id,
-            StepSubmission::LocalComplete => {
-                let finished_data = synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
-                return step.on_completion(&finished_data, pipeline_ctx);
-            }
+        step.validate_required_files(pipeline_ctx)?;
+
+        let StepPlan::Slurm(job_script) = step.prepare(pipeline_ctx)? else {
+            return Err(anyhow!(
+                "{} cannot run with SlurmRunner: step does not produce a Slurm job",
+                step.name()
+            ));
         };
+
+        let mut job_id = slurm_client::submit(&job_script)?;
         let mut retry_count = 0;
 
         loop {
@@ -69,28 +76,18 @@ pub(crate) struct LocalRunner;
 
 impl Runner for LocalRunner {
     fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        step.validate_required_files(pipeline_ctx)?;
+
         match step.prepare(pipeline_ctx)? {
             StepPlan::LocalComplete => {
-                let finished_data = synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
+                let finished_data =
+                    synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
                 step.on_completion(&finished_data, pipeline_ctx)
             }
-            StepPlan::Slurm(job_script) => {
-                let status = Command::new("bash")
-                    .arg(job_script.as_path())
-                    .env("SLURM_ARRAY_TASK_ID", "0")
-                    .status()?;
-
-                if !status.success() {
-                    return Err(anyhow!(
-                        "{} failed locally with exit status: {}",
-                        step.name(),
-                        status
-                    ));
-                }
-
-                let finished_data = synthetic_finished_data(job_script)?;
-                step.on_completion(&finished_data, pipeline_ctx)
-            }
+            StepPlan::Slurm(_) => Err(anyhow!(
+                "{} cannot run with LocalRunner: step requires Slurm",
+                step.name()
+            )),
         }
     }
 }
@@ -98,7 +95,11 @@ impl Runner for LocalRunner {
 pub(crate) struct TestRunner;
 
 impl Runner for TestRunner {
-    fn run_step(&self, _pipeline_step: &dyn PipelineStep, _pipeline_ctx: &PipelineCtx) -> Result<()> {
+    fn run_step(
+        &self,
+        _pipeline_step: &dyn PipelineStep,
+        _pipeline_ctx: &PipelineCtx,
+    ) -> Result<()> {
         todo!()
     }
 }
@@ -213,4 +214,79 @@ fn copy_dir_filtered(source: &Path, target: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct FakeStep {
+        plan: FakePlan,
+    }
+
+    enum FakePlan {
+        Slurm,
+        LocalComplete,
+    }
+
+    impl PipelineStep for FakeStep {
+        fn name(&self) -> &str {
+            "fake"
+        }
+
+        fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
+            match self.plan {
+                FakePlan::Slurm => Ok(StepPlan::Slurm(JobScript::new(
+                    pipeline_ctx.project_dir.join("fake_job.sh"),
+                ))),
+                FakePlan::LocalComplete => Ok(StepPlan::LocalComplete),
+            }
+        }
+
+        fn on_completion(
+            &self,
+            _job_state: &FinishedData,
+            _pipeline_ctx: &PipelineCtx,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_ctx(project_dir: PathBuf) -> PipelineCtx {
+        PipelineCtx {
+            project_dir,
+            generation: 1,
+            poll_interval: Duration::from_secs(1),
+            max_retries: 0,
+            dry_run: false,
+            dry_config_limit: None,
+        }
+    }
+
+    #[test]
+    fn slurm_runner_rejects_local_complete_steps() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp_dir.path().to_path_buf());
+        let step = FakeStep {
+            plan: FakePlan::LocalComplete,
+        };
+
+        let error = SlurmRunner.run_step(&step, &ctx).unwrap_err().to_string();
+
+        assert!(error.contains("cannot run with SlurmRunner"));
+    }
+
+    #[test]
+    fn local_runner_rejects_slurm_steps() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp_dir.path().to_path_buf());
+        let step = FakeStep {
+            plan: FakePlan::Slurm,
+        };
+
+        let error = LocalRunner.run_step(&step, &ctx).unwrap_err().to_string();
+
+        assert!(error.contains("cannot run with LocalRunner"));
+    }
 }

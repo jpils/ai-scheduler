@@ -9,11 +9,20 @@ pub(crate) fn submit(job_script: &JobScript) -> Result<JobId> {
     let sbatch_output = Command::new("sbatch")
         .arg("--parsable")
         .arg(job_script.as_path())
-        .output()?;
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to execute sbatch for {}; is Slurm installed and on PATH?",
+                job_script.as_path().display()
+            )
+        })?;
 
     if !sbatch_output.status.success() {
         let err = String::from_utf8_lossy(&sbatch_output.stderr).to_string();
-        return Err(anyhow!("Failed to submit jobscript with err: {err}"));
+        return Err(anyhow!(
+            "failed to submit job script {}: {err}",
+            job_script.as_path().display()
+        ));
     }
 
     let output = String::from_utf8_lossy(&sbatch_output.stdout).to_string();

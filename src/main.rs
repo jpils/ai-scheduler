@@ -33,9 +33,7 @@ use pipeline::{
     StepCtx,
     TrainingStep,
 };
-use pipeline::runner::{Runner, SlurmRunner};
-
-use crate::pipeline::runner::DryRunner;
+use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -43,6 +41,7 @@ struct Config {
     training: TrainingConfig,
     committee: CommitteeConfig,
     disagreement: Option<DisagreementConfig>,
+    execution: Option<ExecutionConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +80,19 @@ struct DisagreementConfig {
     max_selected: Option<usize>,
     min_rrmse: Option<f64>,
     max_rrmse: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecutionConfig {
+    runner: ExecutionRunner,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum ExecutionRunner {
+    Slurm,
+    Local,
+    DryRun,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -353,12 +365,22 @@ fn main() {
     // ==========================================================
     // 🔄 THE MASTER GENERATION LOOP
     // ==========================================================
-    let runner = match DryRunner::new(&project_dir) {
-        Ok(runner) => runner,
-        Err(error) => {
-            eprintln!(" ❌ Failed to initialize dry runner: {}", error);
-            return;
-        }
+    let runner_mode = config
+        .execution
+        .as_ref()
+        .map(|execution| execution.runner)
+        .unwrap_or(ExecutionRunner::Slurm);
+
+    let runner: Box<dyn Runner> = match runner_mode {
+        ExecutionRunner::Slurm => Box::new(SlurmRunner),
+        ExecutionRunner::Local => Box::new(LocalRunner),
+        ExecutionRunner::DryRun => match DryRunner::new(&project_dir) {
+            Ok(runner) => Box::new(runner),
+            Err(error) => {
+                eprintln!(" ❌ Failed to initialize dry runner: {}", error);
+                return;
+            }
+        },
     };
 
     for gen_num in 1..=total_generations {

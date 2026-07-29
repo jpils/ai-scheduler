@@ -43,6 +43,10 @@ mode = "mock"
 max_selected = 8
 min_rrmse = 0.02
 max_rrmse = 0.40
+
+# Optional. Defaults to "slurm".
+[execution]
+runner = "dry-run" # "slurm", "local", or "dry-run"
 ```
 
 For n2p2, use:
@@ -64,4 +68,6 @@ energy_mode = "raw"
 `disagreement.mode = "mock"` is the current stable branch mode. It computes deterministic mock RRMSE-style force disagreement, writes `disagreement/generation_N/scores.csv`, and exports filtered structures to `selected_structures/generation_N.xyz`.
 
 `max_selected`, `min_rrmse`, and `max_rrmse` define the filtering window. Frames below `min_rrmse` are treated as too certain; frames above `max_rrmse` are treated as too suspicious or unphysical for this first selection pass.
+
+`execution.runner` controls the execution backend. `slurm` is the default and only accepts steps that produce Slurm jobs. `local` only accepts steps that complete locally. `dry-run` validates/prepares work in a temporary project copy and simulates completion.
  
