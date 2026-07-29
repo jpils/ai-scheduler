@@ -1,39 +1,29 @@
 #![allow(unused)]
 
-mod lammps;
-mod paths;
-mod training;
-mod vasp;
-mod watcher;
+mod disagreement;
 mod install;
 mod job_template;
-mod disagreement;
-mod types;
-mod slurm_client;
+mod lammps;
+mod paths;
 mod pipeline;
+mod slurm_client;
+mod training;
+mod types;
+mod vasp;
+mod watcher;
 
 use disagreement::DisagreementSettings;
 use lammps::{LammpsManager, MdModelPackage};
+use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
+use pipeline::{
+    DftCode, DftStep, DisagreementMode as PipelineDisagreementMode,
+    EnergyMode as PipelineEnergyMode, MdEngine, MdStep, ModelBackend as PipelineModelBackend,
+    Pipeline, PipelineCtx, QbcMethod, QbcStep, StepCtx, TrainingStep,
+};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
-use pipeline::{
-    DftCode,
-    DftStep,
-    DisagreementMode as PipelineDisagreementMode,
-    EnergyMode as PipelineEnergyMode,
-    MdEngine,
-    MdStep,
-    ModelBackend as PipelineModelBackend,
-    QbcMethod,
-    Pipeline,
-    PipelineCtx,
-    QbcStep,
-    StepCtx,
-    TrainingStep,
-};
-use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -450,10 +440,7 @@ fn main() {
                 disagreement_settings,
                 disagreement_mode,
             )),
-            Box::new(DftStep::new(
-                DftCode::Vasp,
-                step_ctx(),
-            )),
+            Box::new(DftStep::new(DftCode::Vasp, step_ctx())),
         ]);
 
         let pipeline_ctx = PipelineCtx {

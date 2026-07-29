@@ -69,5 +69,5 @@ energy_mode = "raw"
 
 `max_selected`, `min_rrmse`, and `max_rrmse` define the filtering window. Frames below `min_rrmse` are treated as too certain; frames above `max_rrmse` are treated as too suspicious or unphysical for this first selection pass.
 
-`execution.runner` controls the execution backend. `slurm` is the default and only accepts steps that produce Slurm jobs. `local` only accepts steps that complete locally. `dry-run` validates/prepares work in a temporary project copy and simulates completion.
+`execution.runner` controls the execution backend. `slurm` is the default: it submits Slurm steps and also allows explicitly local steps such as mock disagreement. `local` only accepts steps that complete locally. `dry-run` validates/prepares work in a temporary project copy and simulates completion.
  
