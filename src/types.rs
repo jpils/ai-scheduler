@@ -59,6 +59,7 @@ pub(crate) struct FinishedData {
 pub(crate) enum JobState {
     Pending(PendingData),
     Running(RunningData),
+    Active(String),
     Finished(FinishedData),
     Other(String),
 }

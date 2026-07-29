@@ -3,9 +3,7 @@ use crate::types::{
 };
 
 use anyhow::{Context, Ok, Result, anyhow};
-use std::default;
-use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Command;
 
 pub(crate) fn submit(job_script: &JobScript) -> Result<JobId> {
     let sbatch_output = Command::new("sbatch")
@@ -38,29 +36,34 @@ pub(crate) fn query_state(job_id: &JobId) -> Result<JobState> {
     match queue_state {
         QueueState::Pending => query_pending(job_id),
         QueueState::Running => query_running(job_id),
+        QueueState::Active(state) => Ok(JobState::Active(state)),
         QueueState::NotInQueue => query_finished(job_id),
-        QueueState::Other(s) => return Err(anyhow!("unsupported queue state {s}")),
-        QueueState::Unknown => return Err(anyhow!("queue state was not polled")),
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum QueueState {
     Pending,
     Running,
+    Active(String),
     NotInQueue,
-    Other(String),
-    #[default]
-    Unknown,
 }
 
 impl From<&str> for QueueState {
     fn from(value: &str) -> Self {
-        match value.trim() {
+        let state = value.trim();
+
+        match state {
             "" => QueueState::NotInQueue,
             "PENDING" => QueueState::Pending,
             "RUNNING" => QueueState::Running,
-            s => QueueState::Other(s.to_owned()),
+            "COMPLETING" | "CONFIGURING" | "RESIZING" | "REQUEUED" | "REQUEUE_FED"
+            | "REQUEUE_HOLD" | "SIGNALING" | "SUSPENDED" | "STAGE_OUT" | "STOPPED" => {
+                QueueState::Active(state.to_owned())
+            }
+            "BOOT_FAIL" | "CANCELLED" | "COMPLETED" | "DEADLINE" | "FAILED" | "NODE_FAIL"
+            | "OUT_OF_MEMORY" | "PREEMPTED" | "TIMEOUT" => QueueState::NotInQueue,
+            other => QueueState::Active(other.to_owned()),
         }
     }
 }
@@ -225,10 +228,29 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_queue_state_is_other() {
+    fn transition_queue_state_is_active() {
         assert_eq!(
             QueueState::from("CONFIGURING"),
-            QueueState::Other("CONFIGURING".to_owned())
+            QueueState::Active("CONFIGURING".to_owned())
+        );
+        assert_eq!(
+            QueueState::from(" COMPLETING\n"),
+            QueueState::Active("COMPLETING".to_owned())
+        );
+    }
+
+    #[test]
+    fn terminal_queue_state_queries_accounting() {
+        assert_eq!(QueueState::from("FAILED"), QueueState::NotInQueue);
+        assert_eq!(QueueState::from("TIMEOUT"), QueueState::NotInQueue);
+        assert_eq!(QueueState::from("OUT_OF_MEMORY"), QueueState::NotInQueue);
+    }
+
+    #[test]
+    fn unknown_queue_state_is_still_active() {
+        assert_eq!(
+            QueueState::from("SOME_NEW_STATE"),
+            QueueState::Active("SOME_NEW_STATE".to_owned())
         );
     }
 

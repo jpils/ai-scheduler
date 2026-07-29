@@ -381,6 +381,117 @@ impl TrainingStep {
     }
 }
 
+pub(crate) struct N2p2ScalingStep {
+    ctx: StepCtx,
+    committee_members: usize,
+    energy_mode: EnergyMode,
+}
+
+impl N2p2ScalingStep {
+    pub(crate) fn new(ctx: StepCtx, committee_members: usize, energy_mode: EnergyMode) -> Self {
+        Self {
+            ctx,
+            committee_members,
+            energy_mode,
+        }
+    }
+}
+
+impl PipelineStep for N2p2ScalingStep {
+    fn name(&self) -> &str {
+        "n2p2 scaling"
+    }
+
+    fn validate_required_files(&self, _pipeline_ctx: &PipelineCtx) -> Result<()> {
+        if self.committee_members == 0 {
+            return Err(anyhow!(
+                "n2p2 scaling step requires at least one committee member"
+            ));
+        }
+
+        for path in [
+            self.ctx.setup_dir.join("training").join("input.nn"),
+            self.ctx
+                .setup_dir
+                .join("jobscripts")
+                .join("n2p2_scaling_array.sh.template"),
+            self.ctx
+                .setup_dir
+                .join("jobscripts")
+                .join("n2p2_training_array.sh.template"),
+        ] {
+            if !path.is_file() {
+                return Err(anyhow!("missing n2p2 scaling config: {}", path.display()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
+        if pipeline_ctx.dry_run {
+            prepare_dry_training_dataset(
+                &pipeline_ctx.project_dir,
+                pipeline_ctx.generation,
+                &ModelBackend::N2p2,
+                None,
+            )?;
+        } else {
+            prepare_training_dataset(
+                &pipeline_ctx.project_dir,
+                pipeline_ctx.generation,
+                &ModelBackend::N2p2,
+                None,
+                &self.energy_mode,
+            )
+            .map_err(|error| anyhow!(error))?;
+        }
+
+        let (scaling_script, _training_script) = TrainingWorkspace::create_n2p2_workspace(
+            &pipeline_ctx.project_dir,
+            &self.ctx.setup_dir,
+            pipeline_ctx.generation,
+            self.committee_members,
+        )
+        .map_err(|error| anyhow!(error))?;
+
+        if pipeline_ctx.dry_run {
+            TrainingWorkspace::create_mock_n2p2_scaling_outputs(
+                &pipeline_ctx.project_dir,
+                pipeline_ctx.generation,
+                self.committee_members,
+            )
+            .map_err(|error| anyhow!(error))?;
+        }
+
+        Ok(StepPlan::Slurm(JobScript::new(scaling_script)))
+    }
+
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+
+        let generation_dir = pipeline_ctx
+            .project_dir
+            .join("training")
+            .join(format!("generation_{}", pipeline_ctx.generation));
+        let training_script = generation_dir.join("submit_training_array.sh");
+
+        TrainingWorkspace::write_n2p2_memory_report(
+            &generation_dir,
+            &training_script,
+            self.committee_members,
+        )
+        .map_err(|error| anyhow!(error))?;
+
+        TrainingWorkspace::stage_n2p2_scaling_data_for_training(
+            &pipeline_ctx.project_dir,
+            pipeline_ctx.generation,
+            self.committee_members,
+        )
+        .map_err(|error| anyhow!(error))
+    }
+}
+
 impl PipelineStep for TrainingStep {
     fn name(&self) -> &str {
         self.model_backend.as_str()
@@ -444,26 +555,26 @@ impl PipelineStep for TrainingStep {
     }
 
     fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
-        if pipeline_ctx.dry_run {
-            prepare_dry_training_dataset(
-                &pipeline_ctx.project_dir,
-                pipeline_ctx.generation,
-                &self.model_backend,
-                self.checkpoint.as_deref(),
-            )?;
-        } else {
-            prepare_training_dataset(
-                &pipeline_ctx.project_dir,
-                pipeline_ctx.generation,
-                &self.model_backend,
-                self.checkpoint.as_deref(),
-                &self.energy_mode,
-            )
-            .map_err(|error| anyhow!(error))?;
-        }
-
         let job_script = match self.model_backend {
             ModelBackend::Upet => {
+                if pipeline_ctx.dry_run {
+                    prepare_dry_training_dataset(
+                        &pipeline_ctx.project_dir,
+                        pipeline_ctx.generation,
+                        &self.model_backend,
+                        self.checkpoint.as_deref(),
+                    )?;
+                } else {
+                    prepare_training_dataset(
+                        &pipeline_ctx.project_dir,
+                        pipeline_ctx.generation,
+                        &self.model_backend,
+                        self.checkpoint.as_deref(),
+                        &self.energy_mode,
+                    )
+                    .map_err(|error| anyhow!(error))?;
+                }
+
                 let checkpoint = self
                     .checkpoint
                     .as_deref()
@@ -481,34 +592,18 @@ impl PipelineStep for TrainingStep {
             }
 
             ModelBackend::N2p2 => {
-                let (scaling_script, training_script) = TrainingWorkspace::create_n2p2_workspace(
-                    &pipeline_ctx.project_dir,
-                    &self.ctx.setup_dir,
-                    pipeline_ctx.generation,
-                    self.committee_members,
-                )
-                .map_err(|error| anyhow!(error))?;
-
-                if pipeline_ctx.dry_run {
-                    TrainingWorkspace::create_mock_n2p2_scaling_outputs(
-                        &pipeline_ctx.project_dir,
-                        pipeline_ctx.generation,
-                        self.committee_members,
-                    )
-                    .map_err(|error| anyhow!(error))?;
-                }
-
-                let generation_dir = pipeline_ctx
+                let training_script = pipeline_ctx
                     .project_dir
                     .join("training")
-                    .join(format!("generation_{}", pipeline_ctx.generation));
+                    .join(format!("generation_{}", pipeline_ctx.generation))
+                    .join("submit_training_array.sh");
 
-                TrainingWorkspace::write_n2p2_memory_report(
-                    &generation_dir,
-                    &training_script,
-                    self.committee_members,
-                )
-                .map_err(|error| anyhow!(error))?;
+                if !training_script.is_file() {
+                    return Err(anyhow!(
+                        "n2p2 training script is missing; run n2p2 scaling step first: {}",
+                        training_script.display()
+                    ));
+                }
 
                 training_script
             }

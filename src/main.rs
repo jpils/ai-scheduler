@@ -18,7 +18,8 @@ use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
 use pipeline::{
     DftCode, DftStep, DisagreementMode as PipelineDisagreementMode,
     EnergyMode as PipelineEnergyMode, MdEngine, MdStep, ModelBackend as PipelineModelBackend,
-    Pipeline, PipelineCtx, QbcMethod, QbcStep, StepCtx, TrainingStep,
+    N2p2ScalingStep, Pipeline, PipelineCtx, PipelineStep, QbcMethod, QbcStep, StepCtx,
+    TrainingStep,
 };
 use serde::Deserialize;
 use std::fs;
@@ -418,30 +419,40 @@ fn main() {
             )
         };
 
-        let pipeline = Pipeline::new(vec![
-            Box::new(TrainingStep::new(
-                pipeline_backend,
+        let mut steps: Vec<Box<dyn PipelineStep>> = Vec::new();
+
+        if matches!(pipeline_backend, PipelineModelBackend::N2p2) {
+            steps.push(Box::new(N2p2ScalingStep::new(
                 step_ctx(),
                 config.committee.members,
-                checkpoint_file.clone(),
                 pipeline_energy_mode,
-            )),
-            Box::new(MdStep::new(
-                MdEngine::Lammps,
-                step_ctx(),
-                config.committee.members,
-                model_package,
-            )),
-            Box::new(QbcStep::new(
-                QbcMethod::Rrmsfd,
-                step_ctx(),
-                pipeline_backend,
-                config.committee.members,
-                disagreement_settings,
-                disagreement_mode,
-            )),
-            Box::new(DftStep::new(DftCode::Vasp, step_ctx())),
-        ]);
+            )));
+        }
+
+        steps.push(Box::new(TrainingStep::new(
+            pipeline_backend,
+            step_ctx(),
+            config.committee.members,
+            checkpoint_file.clone(),
+            pipeline_energy_mode,
+        )));
+        steps.push(Box::new(MdStep::new(
+            MdEngine::Lammps,
+            step_ctx(),
+            config.committee.members,
+            model_package,
+        )));
+        steps.push(Box::new(QbcStep::new(
+            QbcMethod::Rrmsfd,
+            step_ctx(),
+            pipeline_backend,
+            config.committee.members,
+            disagreement_settings,
+            disagreement_mode,
+        )));
+        steps.push(Box::new(DftStep::new(DftCode::Vasp, step_ctx())));
+
+        let pipeline = Pipeline::new(steps);
 
         let pipeline_ctx = PipelineCtx {
             project_dir: project_dir.clone(),

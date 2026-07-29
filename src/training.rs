@@ -379,6 +379,7 @@ impl TrainingWorkspace {
         }
 
         let mut checked_logs = 0usize;
+        let mut insufficient_members = Vec::new();
 
         for member_index in 0..committee_members {
             let member_name = format!("member_{member_index:03}");
@@ -408,7 +409,10 @@ impl TrainingWorkspace {
                 Some(estimated_mib) => {
                     let status = match requested_memory_mib {
                         Some(requested_mib) if requested_mib >= estimated_mib => "OK",
-                        Some(_) => "INSUFFICIENT",
+                        Some(_) => {
+                            insufficient_members.push(member_name.clone());
+                            "INSUFFICIENT"
+                        }
                         None => "UNKNOWN",
                     };
 
@@ -435,6 +439,63 @@ impl TrainingWorkspace {
                 error
             )
         })?;
+
+        if !insufficient_members.is_empty() {
+            return Err(format!(
+                "n2p2 training memory request is insufficient for {}; see {}",
+                insufficient_members.join(", "),
+                report.display()
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn stage_n2p2_scaling_data_for_training(
+        project_dir: &Path,
+        generation: u32,
+        committee_members: usize,
+    ) -> Result<(), String> {
+        if committee_members == 0 {
+            return Err("Cannot stage n2p2 scaling data for zero committee members.".to_string());
+        }
+
+        let models_dir = project_dir
+            .join("training")
+            .join(format!("generation_{generation}"))
+            .join("models");
+
+        for member_index in 0..committee_members {
+            let member_name = format!("member_{member_index:03}");
+            let member_dir = models_dir.join(&member_name);
+            let scaling_data = member_dir.join("scaling").join("scaling.data");
+            let train_dir = member_dir.join("train");
+
+            if !scaling_data.is_file() {
+                return Err(format!(
+                    "Required n2p2 scaling output is missing for {}: {}",
+                    member_name,
+                    scaling_data.display()
+                ));
+            }
+
+            if !train_dir.is_dir() {
+                return Err(format!(
+                    "n2p2 training directory is missing for {}: {}",
+                    member_name,
+                    train_dir.display()
+                ));
+            }
+
+            fs::copy(&scaling_data, train_dir.join("scaling.data")).map_err(|error| {
+                format!(
+                    "Failed to copy {} into {}: {}",
+                    scaling_data.display(),
+                    train_dir.display(),
+                    error
+                )
+            })?;
+        }
 
         Ok(())
     }
