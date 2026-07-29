@@ -1,39 +1,30 @@
 #![allow(unused)]
 
-mod lammps;
-mod paths;
-mod training;
-mod vasp;
-mod watcher;
+mod disagreement;
 mod install;
 mod job_template;
-mod disagreement;
-mod types;
-mod slurm_client;
+mod lammps;
+mod paths;
 mod pipeline;
+mod slurm_client;
+mod training;
+mod types;
+mod vasp;
+mod watcher;
 
 use disagreement::DisagreementSettings;
 use lammps::{LammpsManager, MdModelPackage};
+use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
+use pipeline::{
+    DftCode, DftStep, DisagreementMode as PipelineDisagreementMode,
+    EnergyMode as PipelineEnergyMode, MdEngine, MdStep, ModelBackend as PipelineModelBackend,
+    N2p2ScalingStep, Pipeline, PipelineCtx, PipelineStep, QbcMethod, QbcStep, StepCtx,
+    TrainingStep,
+};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
-use pipeline::{
-    DftCode,
-    DftStep,
-    DisagreementMode as PipelineDisagreementMode,
-    EnergyMode as PipelineEnergyMode,
-    MdEngine,
-    MdStep,
-    ModelBackend as PipelineModelBackend,
-    QbcMethod,
-    Pipeline,
-    PipelineCtx,
-    QbcStep,
-    StepCtx,
-    TrainingStep,
-};
-use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -121,7 +112,7 @@ impl DisagreementConfig {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() > 1 && args[1] == "init" {
+    if args.len() > 1 && matches!(args[1].as_str(), "init" | "--init") {
         if let Err(e) = install::initialize() {
             eprintln!("❌ {}", e);
         }
@@ -428,33 +419,40 @@ fn main() {
             )
         };
 
-        let pipeline = Pipeline::new(vec![
-            Box::new(TrainingStep::new(
-                pipeline_backend,
+        let mut steps: Vec<Box<dyn PipelineStep>> = Vec::new();
+
+        if matches!(pipeline_backend, PipelineModelBackend::N2p2) {
+            steps.push(Box::new(N2p2ScalingStep::new(
                 step_ctx(),
                 config.committee.members,
-                checkpoint_file.clone(),
                 pipeline_energy_mode,
-            )),
-            Box::new(MdStep::new(
-                MdEngine::Lammps,
-                step_ctx(),
-                config.committee.members,
-                model_package,
-            )),
-            Box::new(QbcStep::new(
-                QbcMethod::Rrmsfd,
-                step_ctx(),
-                pipeline_backend,
-                config.committee.members,
-                disagreement_settings,
-                disagreement_mode,
-            )),
-            Box::new(DftStep::new(
-                DftCode::Vasp,
-                step_ctx(),
-            )),
-        ]);
+            )));
+        }
+
+        steps.push(Box::new(TrainingStep::new(
+            pipeline_backend,
+            step_ctx(),
+            config.committee.members,
+            checkpoint_file.clone(),
+            pipeline_energy_mode,
+        )));
+        steps.push(Box::new(MdStep::new(
+            MdEngine::Lammps,
+            step_ctx(),
+            config.committee.members,
+            model_package,
+        )));
+        steps.push(Box::new(QbcStep::new(
+            QbcMethod::Rrmsfd,
+            step_ctx(),
+            pipeline_backend,
+            config.committee.members,
+            disagreement_settings,
+            disagreement_mode,
+        )));
+        steps.push(Box::new(DftStep::new(DftCode::Vasp, step_ctx())));
+
+        let pipeline = Pipeline::new(steps);
 
         let pipeline_ctx = PipelineCtx {
             project_dir: project_dir.clone(),

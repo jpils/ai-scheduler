@@ -8,8 +8,12 @@ use crate::{
     types::{FinalJobStatus, FinishedData, JobId, JobScript},
     vasp::VaspWorkspace,
 };
-use std::{path::{Path, PathBuf}, process::Command, time::Duration};
 use anyhow::{Result, anyhow};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 pub(crate) enum StepPlan {
     Slurm(JobScript),
@@ -34,7 +38,7 @@ pub(crate) trait PipelineStep {
 }
 
 pub(crate) struct Pipeline {
-    steps: Vec<Box<dyn PipelineStep>>
+    steps: Vec<Box<dyn PipelineStep>>,
 }
 
 impl Pipeline {
@@ -60,7 +64,11 @@ pub(crate) struct StepCtx {
 
 impl StepCtx {
     pub(crate) fn new(working_dir: PathBuf, setup_dir: PathBuf, template: PathBuf) -> Self {
-        Self { working_dir, setup_dir, template }
+        Self {
+            working_dir,
+            setup_dir,
+            template,
+        }
     }
 }
 
@@ -72,7 +80,7 @@ pub(crate) enum MdEngine {
 impl MdEngine {
     fn as_str(&self) -> &str {
         match self {
-            Self::Lammps => "lammps"
+            Self::Lammps => "lammps",
         }
     }
 }
@@ -85,7 +93,7 @@ pub(crate) enum DftCode {
 impl DftCode {
     fn as_str(&self) -> &str {
         match self {
-            Self::Vasp => "vasp"
+            Self::Vasp => "vasp",
         }
     }
 }
@@ -93,14 +101,14 @@ impl DftCode {
 #[derive(Clone, Copy)]
 pub(crate) enum ModelBackend {
     Upet,
-    N2p2
+    N2p2,
 }
 
 impl ModelBackend {
     fn as_str(&self) -> &str {
         match self {
             Self::Upet => "UPET",
-            Self::N2p2 => "n2p2"
+            Self::N2p2 => "n2p2",
         }
     }
 
@@ -172,7 +180,12 @@ impl MdStep {
         committee_members: usize,
         model_package: Option<MdModelPackage>,
     ) -> Self {
-        Self { engine, ctx, committee_members, model_package }
+        Self {
+            engine,
+            ctx,
+            committee_members,
+            model_package,
+        }
     }
 }
 
@@ -189,12 +202,21 @@ impl PipelineStep for MdStep {
         LammpsManager::find_input_file(&self.ctx.setup_dir, pipeline_ctx.generation)
             .map_err(|error| anyhow!(error))?;
 
-        let data_file = self.ctx.setup_dir.join("lammps").join("data").join("lmp.data");
+        let data_file = self
+            .ctx
+            .setup_dir
+            .join("lammps")
+            .join("data")
+            .join("lmp.data");
         if !data_file.is_file() {
             return Err(anyhow!("missing LAMMPS data file: {}", data_file.display()));
         }
 
-        let template = self.ctx.setup_dir.join("jobscripts").join("md_array.sh.template");
+        let template = self
+            .ctx
+            .setup_dir
+            .join("jobscripts")
+            .join("md_array.sh.template");
         if !template.is_file() {
             return Err(anyhow!("missing MD job template: {}", template.display()));
         }
@@ -209,19 +231,23 @@ impl PipelineStep for MdStep {
             pipeline_ctx.generation,
             self.committee_members,
             self.model_package,
-        ).map_err(|error| anyhow!(error))?;
+        )
+        .map_err(|error| anyhow!(error))?;
 
-        Ok(StepPlan::Slurm(JobScript::new(generation_dir.join("submit_array.sh"))))
+        Ok(StepPlan::Slurm(JobScript::new(
+            generation_dir.join("submit_array.sh"),
+        )))
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+        validate_md_outputs(&pipeline_ctx.project_dir, pipeline_ctx.generation)
     }
 }
 
 pub(crate) struct DftStep {
     dft_code: DftCode,
-    ctx: StepCtx
+    ctx: StepCtx,
 }
 
 impl DftStep {
@@ -243,27 +269,37 @@ impl PipelineStep for DftStep {
             }
         }
 
-        let template = self.ctx.setup_dir.join("jobscripts").join("vasp_array.sh.template");
+        let template = self
+            .ctx
+            .setup_dir
+            .join("jobscripts")
+            .join("vasp_array.sh.template");
         if !template.is_file() {
             return Err(anyhow!("missing VASP job template: {}", template.display()));
         }
 
-        let selected = pipeline_ctx.project_dir
+        let selected = pipeline_ctx
+            .project_dir
             .join("selected_structures")
             .join(format!("generation_{}.xyz", pipeline_ctx.generation));
 
-        if !selected.is_file() && dry_seed_dataset(&pipeline_ctx.project_dir).is_err() {
-            return Err(anyhow!(
-                "missing selected structures and seed dataset for DFT dry-run: {}",
-                selected.display()
-            ));
+        if !selected.is_file() {
+            if pipeline_ctx.dry_run {
+                dry_seed_dataset(&pipeline_ctx.project_dir)?;
+            } else {
+                return Err(anyhow!(
+                    "missing selected structures file: {}",
+                    selected.display()
+                ));
+            }
         }
 
         Ok(())
     }
 
     fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
-        let selected_structures = pipeline_ctx.project_dir
+        let selected_structures = pipeline_ctx
+            .project_dir
             .join("selected_structures")
             .join(format!("generation_{}.xyz", pipeline_ctx.generation));
 
@@ -278,7 +314,8 @@ impl PipelineStep for DftStep {
             ));
         };
 
-        let generation_dir = pipeline_ctx.project_dir
+        let generation_dir = pipeline_ctx
+            .project_dir
             .join("vasp_runs")
             .join(format!("generation_{}", pipeline_ctx.generation));
 
@@ -299,7 +336,9 @@ impl PipelineStep for DftStep {
                 config_index,
             )?;
 
-            VaspWorkspace::create_mock_outcar(&run_dir, config_index)?;
+            if pipeline_ctx.dry_run {
+                VaspWorkspace::create_mock_outcar(&run_dir, config_index)?;
+            }
         }
 
         let job_script = VaspWorkspace::create_array_script(
@@ -312,8 +351,9 @@ impl PipelineStep for DftStep {
         Ok(StepPlan::Slurm(JobScript::new(job_script)))
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+        validate_vasp_outputs(pipeline_ctx)
     }
 }
 
@@ -333,7 +373,124 @@ impl TrainingStep {
         checkpoint: Option<PathBuf>,
         energy_mode: EnergyMode,
     ) -> Self {
-        Self { model_backend, ctx, committee_members, checkpoint, energy_mode }
+        Self {
+            model_backend,
+            ctx,
+            committee_members,
+            checkpoint,
+            energy_mode,
+        }
+    }
+}
+
+pub(crate) struct N2p2ScalingStep {
+    ctx: StepCtx,
+    committee_members: usize,
+    energy_mode: EnergyMode,
+}
+
+impl N2p2ScalingStep {
+    pub(crate) fn new(ctx: StepCtx, committee_members: usize, energy_mode: EnergyMode) -> Self {
+        Self {
+            ctx,
+            committee_members,
+            energy_mode,
+        }
+    }
+}
+
+impl PipelineStep for N2p2ScalingStep {
+    fn name(&self) -> &str {
+        "n2p2 scaling"
+    }
+
+    fn validate_required_files(&self, _pipeline_ctx: &PipelineCtx) -> Result<()> {
+        if self.committee_members == 0 {
+            return Err(anyhow!(
+                "n2p2 scaling step requires at least one committee member"
+            ));
+        }
+
+        for path in [
+            self.ctx.setup_dir.join("training").join("input.nn"),
+            self.ctx
+                .setup_dir
+                .join("jobscripts")
+                .join("n2p2_scaling_array.sh.template"),
+            self.ctx
+                .setup_dir
+                .join("jobscripts")
+                .join("n2p2_training_array.sh.template"),
+        ] {
+            if !path.is_file() {
+                return Err(anyhow!("missing n2p2 scaling config: {}", path.display()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
+        if pipeline_ctx.dry_run {
+            prepare_dry_training_dataset(
+                &pipeline_ctx.project_dir,
+                pipeline_ctx.generation,
+                &ModelBackend::N2p2,
+                None,
+            )?;
+        } else {
+            prepare_training_dataset(
+                &pipeline_ctx.project_dir,
+                pipeline_ctx.generation,
+                &ModelBackend::N2p2,
+                None,
+                &self.energy_mode,
+            )
+            .map_err(|error| anyhow!(error))?;
+        }
+
+        let (scaling_script, _training_script) = TrainingWorkspace::create_n2p2_workspace(
+            &pipeline_ctx.project_dir,
+            &self.ctx.setup_dir,
+            pipeline_ctx.generation,
+            self.committee_members,
+        )
+        .map_err(|error| anyhow!(error))?;
+
+        if pipeline_ctx.dry_run {
+            TrainingWorkspace::create_mock_n2p2_scaling_outputs(
+                &pipeline_ctx.project_dir,
+                pipeline_ctx.generation,
+                self.committee_members,
+            )
+            .map_err(|error| anyhow!(error))?;
+        }
+
+        Ok(StepPlan::Slurm(JobScript::new(scaling_script)))
+    }
+
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+
+        let generation_dir = pipeline_ctx
+            .project_dir
+            .join("training")
+            .join(format!("generation_{}", pipeline_ctx.generation));
+        let training_script = generation_dir.join("submit_training_array.sh");
+
+        TrainingWorkspace::write_n2p2_memory_report(
+            &generation_dir,
+            &training_script,
+            self.committee_members,
+        )
+        .map_err(|error| anyhow!(error))?;
+
+        TrainingWorkspace::stage_n2p2_scaling_data_for_training(
+            &pipeline_ctx.project_dir,
+            pipeline_ctx.generation,
+            self.committee_members,
+        )
+        .map_err(|error| anyhow!(error))
     }
 }
 
@@ -344,20 +501,33 @@ impl PipelineStep for TrainingStep {
 
     fn validate_required_files(&self, _pipeline_ctx: &PipelineCtx) -> Result<()> {
         if self.committee_members == 0 {
-            return Err(anyhow!("training step requires at least one committee member"));
+            return Err(anyhow!(
+                "training step requires at least one committee member"
+            ));
         }
 
         match self.model_backend {
             ModelBackend::Upet => {
-                let checkpoint = self.checkpoint.as_deref()
+                let checkpoint = self
+                    .checkpoint
+                    .as_deref()
                     .ok_or_else(|| anyhow!("UPET training requires a checkpoint"))?;
                 if !checkpoint.is_file() {
-                    return Err(anyhow!("checkpoint does not exist: {}", checkpoint.display()));
+                    return Err(anyhow!(
+                        "checkpoint does not exist: {}",
+                        checkpoint.display()
+                    ));
                 }
 
                 for path in [
-                    self.ctx.setup_dir.join("training").join("upet.yaml.template"),
-                    self.ctx.setup_dir.join("jobscripts").join("upet_training_array.sh.template"),
+                    self.ctx
+                        .setup_dir
+                        .join("training")
+                        .join("upet.yaml.template"),
+                    self.ctx
+                        .setup_dir
+                        .join("jobscripts")
+                        .join("upet_training_array.sh.template"),
                 ] {
                     if !path.is_file() {
                         return Err(anyhow!("missing UPET training config: {}", path.display()));
@@ -367,8 +537,14 @@ impl PipelineStep for TrainingStep {
             ModelBackend::N2p2 => {
                 for path in [
                     self.ctx.setup_dir.join("training").join("input.nn"),
-                    self.ctx.setup_dir.join("jobscripts").join("n2p2_scaling_array.sh.template"),
-                    self.ctx.setup_dir.join("jobscripts").join("n2p2_training_array.sh.template"),
+                    self.ctx
+                        .setup_dir
+                        .join("jobscripts")
+                        .join("n2p2_scaling_array.sh.template"),
+                    self.ctx
+                        .setup_dir
+                        .join("jobscripts")
+                        .join("n2p2_training_array.sh.template"),
                 ] {
                     if !path.is_file() {
                         return Err(anyhow!("missing n2p2 training config: {}", path.display()));
@@ -381,28 +557,30 @@ impl PipelineStep for TrainingStep {
     }
 
     fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
-        if pipeline_ctx.dry_run {
-            prepare_dry_training_dataset(
-                &pipeline_ctx.project_dir,
-                pipeline_ctx.generation,
-                &self.model_backend,
-                self.checkpoint.as_deref(),
-            )?;
-        } else {
-            prepare_training_dataset(
-                &pipeline_ctx.project_dir,
-                pipeline_ctx.generation,
-                &self.model_backend,
-                self.checkpoint.as_deref(),
-                &self.energy_mode,
-            ).map_err(|error| anyhow!(error))?;
-        }
-
         let job_script = match self.model_backend {
             ModelBackend::Upet => {
-                let checkpoint = self.checkpoint.as_deref().ok_or_else(|| {
-                    anyhow!("UPET training requires a checkpoint")
-                })?;
+                if pipeline_ctx.dry_run {
+                    prepare_dry_training_dataset(
+                        &pipeline_ctx.project_dir,
+                        pipeline_ctx.generation,
+                        &self.model_backend,
+                        self.checkpoint.as_deref(),
+                    )?;
+                } else {
+                    prepare_training_dataset(
+                        &pipeline_ctx.project_dir,
+                        pipeline_ctx.generation,
+                        &self.model_backend,
+                        self.checkpoint.as_deref(),
+                        &self.energy_mode,
+                    )
+                    .map_err(|error| anyhow!(error))?;
+                }
+
+                let checkpoint = self
+                    .checkpoint
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("UPET training requires a checkpoint"))?;
 
                 TrainingWorkspace::create_upet_workspace(
                     &pipeline_ctx.project_dir,
@@ -411,32 +589,23 @@ impl PipelineStep for TrainingStep {
                     self.committee_members,
                     checkpoint,
                     self.energy_mode.training_key(),
-                ).map_err(|error| anyhow!(error))?
+                )
+                .map_err(|error| anyhow!(error))?
             }
 
             ModelBackend::N2p2 => {
-                let (scaling_script, training_script) = TrainingWorkspace::create_n2p2_workspace(
-                    &pipeline_ctx.project_dir,
-                    &self.ctx.setup_dir,
-                    pipeline_ctx.generation,
-                    self.committee_members,
-                ).map_err(|error| anyhow!(error))?;
-
-                TrainingWorkspace::create_mock_n2p2_scaling_outputs(
-                    &pipeline_ctx.project_dir,
-                    pipeline_ctx.generation,
-                    self.committee_members,
-                ).map_err(|error| anyhow!(error))?;
-
-                let generation_dir = pipeline_ctx.project_dir
+                let training_script = pipeline_ctx
+                    .project_dir
                     .join("training")
-                    .join(format!("generation_{}", pipeline_ctx.generation));
+                    .join(format!("generation_{}", pipeline_ctx.generation))
+                    .join("submit_training_array.sh");
 
-                TrainingWorkspace::write_n2p2_memory_report(
-                    &generation_dir,
-                    &training_script,
-                    self.committee_members,
-                ).map_err(|error| anyhow!(error))?;
+                if !training_script.is_file() {
+                    return Err(anyhow!(
+                        "n2p2 training script is missing; run n2p2 scaling step first: {}",
+                        training_script.display()
+                    ));
+                }
 
                 training_script
             }
@@ -449,24 +618,46 @@ impl PipelineStep for TrainingStep {
         ensure_completed(job_state)?;
 
         match self.model_backend {
-            ModelBackend::Upet => TrainingWorkspace::create_mock_upet_models(
-                &pipeline_ctx.project_dir,
-                pipeline_ctx.generation,
-                self.committee_members,
-            ).map_err(|error| anyhow!(error)),
+            ModelBackend::Upet => {
+                if pipeline_ctx.dry_run {
+                    TrainingWorkspace::create_mock_upet_models(
+                        &pipeline_ctx.project_dir,
+                        pipeline_ctx.generation,
+                        self.committee_members,
+                    )
+                    .map_err(|error| anyhow!(error))?;
+                }
 
-            ModelBackend::N2p2 => {
-                TrainingWorkspace::create_mock_n2p2_training_outputs(
+                validate_upet_training_outputs(
                     &pipeline_ctx.project_dir,
                     pipeline_ctx.generation,
                     self.committee_members,
-                ).map_err(|error| anyhow!(error))?;
+                    pipeline_ctx.dry_run,
+                )
+            }
+
+            ModelBackend::N2p2 => {
+                if pipeline_ctx.dry_run {
+                    TrainingWorkspace::create_mock_n2p2_training_outputs(
+                        &pipeline_ctx.project_dir,
+                        pipeline_ctx.generation,
+                        self.committee_members,
+                    )
+                    .map_err(|error| anyhow!(error))?;
+                }
 
                 TrainingWorkspace::select_n2p2_best_epoch(
                     &pipeline_ctx.project_dir,
                     pipeline_ctx.generation,
                     self.committee_members,
-                ).map_err(|error| anyhow!(error))
+                )
+                .map_err(|error| anyhow!(error))?;
+
+                validate_n2p2_training_outputs(
+                    &pipeline_ctx.project_dir,
+                    pipeline_ctx.generation,
+                    self.committee_members,
+                )
             }
         }
     }
@@ -496,7 +687,14 @@ impl QbcStep {
         settings: DisagreementSettings,
         mode: DisagreementMode,
     ) -> Self {
-        Self { method, ctx, backend, committee_members, settings, mode }
+        Self {
+            method,
+            ctx,
+            backend,
+            committee_members,
+            settings,
+            mode,
+        }
     }
 }
 
@@ -511,12 +709,16 @@ impl PipelineStep for QbcStep {
         }
 
         if matches!(self.mode, DisagreementMode::Real) {
-            let template = self.ctx.setup_dir
-                .join("jobscripts")
-                .join(format!("{}_disagreement.sh.template", self.backend.backend_key()));
+            let template = self.ctx.setup_dir.join("jobscripts").join(format!(
+                "{}_disagreement.sh.template",
+                self.backend.backend_key()
+            ));
 
             if !template.is_file() {
-                return Err(anyhow!("missing disagreement job template: {}", template.display()));
+                return Err(anyhow!(
+                    "missing disagreement job template: {}",
+                    template.display()
+                ));
             }
         }
 
@@ -532,7 +734,8 @@ impl PipelineStep for QbcStep {
                     self.backend.backend_key(),
                     self.committee_members,
                     self.settings,
-                ).map_err(|error| anyhow!(error))?;
+                )
+                .map_err(|error| anyhow!(error))?;
 
                 Ok(StepPlan::LocalComplete)
             }
@@ -544,15 +747,17 @@ impl PipelineStep for QbcStep {
                     pipeline_ctx.generation,
                     self.backend.backend_key(),
                     self.settings,
-                ).map_err(|error| anyhow!(error))?;
+                )
+                .map_err(|error| anyhow!(error))?;
 
                 Ok(StepPlan::Slurm(JobScript::new(job_script)))
             }
         }
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+        validate_disagreement_outputs(&pipeline_ctx.project_dir, pipeline_ctx.generation)
     }
 }
 
@@ -563,11 +768,14 @@ fn prepare_dry_training_dataset(
     checkpoint_file: Option<&Path>,
 ) -> Result<()> {
     if matches!(backend, ModelBackend::Upet) {
-        let checkpoint = checkpoint_file
-            .ok_or_else(|| anyhow!("UPET dry-run requires a checkpoint"))?;
+        let checkpoint =
+            checkpoint_file.ok_or_else(|| anyhow!("UPET dry-run requires a checkpoint"))?;
 
         if !checkpoint.is_file() {
-            return Err(anyhow!("checkpoint does not exist: {}", checkpoint.display()));
+            return Err(anyhow!(
+                "checkpoint does not exist: {}",
+                checkpoint.display()
+            ));
         }
     }
 
@@ -599,8 +807,14 @@ fn prepare_dry_training_dataset(
 }
 
 fn dry_seed_dataset(project_dir: &Path) -> Result<PathBuf> {
-    let extxyz = project_dir.join("setup").join("training").join("seed_dataset.extxyz");
-    let xyz = project_dir.join("setup").join("training").join("seed_dataset.xyz");
+    let extxyz = project_dir
+        .join("setup")
+        .join("training")
+        .join("seed_dataset.extxyz");
+    let xyz = project_dir
+        .join("setup")
+        .join("training")
+        .join("seed_dataset.xyz");
 
     if extxyz.is_file() {
         Ok(extxyz)
@@ -649,8 +863,181 @@ fn prepare_training_dataset(
 fn ensure_completed(job_state: &FinishedData) -> Result<()> {
     match job_state.final_status {
         FinalJobStatus::Completed => Ok(()),
-        ref status => Err(anyhow!("job finished with non-completed status: {status:?}")),
+        ref status => Err(anyhow!(
+            "job finished with non-completed status: {status:?}"
+        )),
     }
+}
+
+fn validate_upet_training_outputs(
+    project_dir: &Path,
+    generation: u32,
+    committee_members: usize,
+    dry_run: bool,
+) -> Result<()> {
+    for member_index in 0..committee_members {
+        let member_dir = project_dir
+            .join("training")
+            .join(format!("generation_{generation}"))
+            .join("models")
+            .join(format!("member_{member_index:03}"));
+        let model = member_dir.join("model.pt");
+
+        if dry_run {
+            let mock_model = member_dir.join("mock_trained_model.pt");
+            if model.is_file() {
+                require_nonempty_file(&model, "UPET trained model")?;
+            } else {
+                require_nonempty_file(&mock_model, "mock UPET trained model")?;
+            }
+        } else {
+            require_nonempty_file(&model, "UPET trained model")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_n2p2_training_outputs(
+    project_dir: &Path,
+    generation: u32,
+    committee_members: usize,
+) -> Result<()> {
+    for member_index in 0..committee_members {
+        let member_dir = project_dir
+            .join("training")
+            .join(format!("generation_{generation}"))
+            .join("models")
+            .join(format!("member_{member_index:03}"));
+
+        for file_name in [
+            "input.data",
+            "input.nn",
+            "scaling.data",
+            "selected_epoch.txt",
+        ] {
+            require_nonempty_file(&member_dir.join(file_name), "n2p2 selected model file")?;
+        }
+
+        let mut weights_count = 0usize;
+        for entry in std::fs::read_dir(&member_dir)
+            .map_err(|error| anyhow!("failed to read {}: {}", member_dir.display(), error))?
+        {
+            let entry = entry.map_err(|error| {
+                anyhow!("failed to inspect {}: {}", member_dir.display(), error)
+            })?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if file_name.starts_with("weights.") && file_name.ends_with(".data") {
+                require_nonempty_file(&path, "n2p2 selected weight file")?;
+                weights_count += 1;
+            }
+        }
+
+        if weights_count == 0 {
+            return Err(anyhow!(
+                "n2p2 selected weights are missing in {}",
+                member_dir.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_md_outputs(project_dir: &Path, generation: u32) -> Result<()> {
+    let run_dir = project_dir
+        .join("md_runs")
+        .join(format!("generation_{generation}"))
+        .join("run_000");
+
+    require_nonempty_file(&run_dir.join("traj.dump"), "LAMMPS trajectory")
+}
+
+fn validate_disagreement_outputs(project_dir: &Path, generation: u32) -> Result<()> {
+    let disagreement_dir = project_dir
+        .join("disagreement")
+        .join(format!("generation_{generation}"));
+    let selected = project_dir
+        .join("selected_structures")
+        .join(format!("generation_{generation}.xyz"));
+
+    require_nonempty_file(&disagreement_dir.join("scores.csv"), "disagreement scores")?;
+    require_nonempty_file(
+        &disagreement_dir.join("selected.xyz"),
+        "selected structures",
+    )?;
+    require_nonempty_file(&selected, "exported selected structures")
+}
+
+fn validate_vasp_outputs(pipeline_ctx: &PipelineCtx) -> Result<()> {
+    let selected_structures = pipeline_ctx
+        .project_dir
+        .join("selected_structures")
+        .join(format!("generation_{}.xyz", pipeline_ctx.generation));
+    let selected_structures = if selected_structures.is_file() {
+        selected_structures
+    } else if pipeline_ctx.dry_run {
+        dry_seed_dataset(&pipeline_ctx.project_dir)?
+    } else {
+        return Err(anyhow!(
+            "selected structures file not found for VASP validation: {}",
+            selected_structures.display()
+        ));
+    };
+
+    let count = VaspWorkspace::get_configuration_count(&selected_structures)?;
+    let count = pipeline_ctx
+        .dry_config_limit
+        .map_or(count, |limit| count.min(limit));
+    let generation_dir = pipeline_ctx
+        .project_dir
+        .join("vasp_runs")
+        .join(format!("generation_{}", pipeline_ctx.generation));
+
+    for config_index in 0..count {
+        let outcar = generation_dir
+            .join(format!("config_{config_index:03}"))
+            .join("OUTCAR");
+        require_nonempty_file(&outcar, "VASP OUTCAR")?;
+
+        let text = std::fs::read_to_string(&outcar)
+            .map_err(|error| anyhow!("failed to read {}: {}", outcar.display(), error))?;
+        for marker in [
+            "POSITION",
+            "TOTAL-FORCES",
+            "free  energy   TOTEN",
+            "General timing and accounting",
+        ] {
+            if !text.contains(marker) {
+                return Err(anyhow!(
+                    "VASP OUTCAR {} is missing marker {:?}",
+                    outcar.display(),
+                    marker
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn require_nonempty_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| anyhow!("missing {} {}: {}", label, path.display(), error))?;
+
+    if !metadata.is_file() {
+        return Err(anyhow!("{} is not a file: {}", label, path.display()));
+    }
+
+    if metadata.len() == 0 {
+        return Err(anyhow!("{} is empty: {}", label, path.display()));
+    }
+
+    Ok(())
 }
 
 fn parse_command() -> Result<Command> {

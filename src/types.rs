@@ -1,5 +1,5 @@
-use std::path::{PathBuf, Path};
 use anyhow::{Context, Ok, Result, anyhow};
+use std::path::{Path, PathBuf};
 use strum_macros::EnumString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,11 +14,12 @@ impl JobId {
             .ok_or_else(|| anyhow!("Invalid job id"))?
             .trim();
 
-        if jobid.is_empty() { 
-            return Err(anyhow!("job id is empty")) 
+        if jobid.is_empty() {
+            return Err(anyhow!("job id is empty"));
         }
 
-        jobid.parse::<u64>()
+        jobid
+            .parse::<u64>()
             .context("Parse error: job id invalid format")?;
 
         Ok(Self(jobid.into()))
@@ -54,13 +55,13 @@ pub(crate) struct FinishedData {
     pub(crate) final_status: FinalJobStatus,
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobState {
     Pending(PendingData),
     Running(RunningData),
+    Active(String),
     Finished(FinishedData),
-    Other(String)
+    Other(String),
 }
 
 #[derive(Debug, EnumString, Clone, PartialEq)]
@@ -72,7 +73,7 @@ pub(crate) enum FinalJobStatus {
     OutOfMemory,
     Failed,
     #[strum(default)]
-    Other(String)
+    Other(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

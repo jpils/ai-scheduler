@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -31,10 +31,9 @@ impl Runner for SlurmRunner {
         step.validate_required_files(pipeline_ctx)?;
 
         let StepPlan::Slurm(job_script) = step.prepare(pipeline_ctx)? else {
-            return Err(anyhow!(
-                "{} cannot run with SlurmRunner: step does not produce a Slurm job",
-                step.name()
-            ));
+            let finished_data = synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
+            step.on_completion(&finished_data, pipeline_ctx)?;
+            return Ok(());
         };
 
         let mut job_id = slurm_client::submit(&job_script)?;
@@ -154,11 +153,15 @@ impl Runner for DryRunner {
         match step.prepare(pipeline_ctx)? {
             StepPlan::LocalComplete => {
                 println!("[DryRun] {} completed locally", step.describe());
-                let finished_data = synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
+                let finished_data =
+                    synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
                 step.on_completion(&finished_data, pipeline_ctx)?;
             }
             StepPlan::Slurm(job_script) => {
-                println!("[DryRun] would submit: sbatch {}", job_script.as_path().display());
+                println!(
+                    "[DryRun] would submit: sbatch {}",
+                    job_script.as_path().display()
+                );
 
                 let finished_data = synthetic_finished_data(job_script)?;
                 step.on_completion(&finished_data, pipeline_ctx)?;
@@ -182,7 +185,10 @@ fn synthetic_finished_data(jobscript: JobScript) -> Result<FinishedData> {
 
 fn copy_project_for_dry_run(source: &Path, target: &Path) -> Result<()> {
     if !source.is_dir() {
-        return Err(anyhow!("dry-run project dir is not a directory: {}", source.display()));
+        return Err(anyhow!(
+            "dry-run project dir is not a directory: {}",
+            source.display()
+        ));
     }
 
     copy_dir_filtered(source, target)
@@ -196,7 +202,10 @@ fn copy_dir_filtered(source: &Path, target: &Path) -> Result<()> {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
 
-        if matches!(file_name_str.as_ref(), "target" | ".git" | ".jj" | ".direnv") {
+        if matches!(
+            file_name_str.as_ref(),
+            "target" | ".git" | ".jj" | ".direnv"
+        ) {
             continue;
         }
 
@@ -265,16 +274,14 @@ mod tests {
     }
 
     #[test]
-    fn slurm_runner_rejects_local_complete_steps() {
+    fn slurm_runner_accepts_local_complete_steps() {
         let temp_dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp_dir.path().to_path_buf());
         let step = FakeStep {
             plan: FakePlan::LocalComplete,
         };
 
-        let error = SlurmRunner.run_step(&step, &ctx).unwrap_err().to_string();
-
-        assert!(error.contains("cannot run with SlurmRunner"));
+        SlurmRunner.run_step(&step, &ctx).unwrap();
     }
 
     #[test]

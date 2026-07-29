@@ -1,9 +1,9 @@
-use crate::types::{FinalJobStatus, JobId, JobScript, JobState, PendingData, RunningData, FinishedData};
+use crate::types::{
+    FinalJobStatus, FinishedData, JobId, JobScript, JobState, PendingData, RunningData,
+};
 
-use std::default;
-use std::process::{Command, Output};
-use std::path::PathBuf;
 use anyhow::{Context, Ok, Result, anyhow};
+use std::process::Command;
 
 pub(crate) fn submit(job_script: &JobScript) -> Result<JobId> {
     let sbatch_output = Command::new("sbatch")
@@ -36,29 +36,34 @@ pub(crate) fn query_state(job_id: &JobId) -> Result<JobState> {
     match queue_state {
         QueueState::Pending => query_pending(job_id),
         QueueState::Running => query_running(job_id),
+        QueueState::Active(state) => Ok(JobState::Active(state)),
         QueueState::NotInQueue => query_finished(job_id),
-        QueueState::Other(s) => { return Err(anyhow!("unsupported queue state {s}")) },
-        QueueState::Unknown => { return Err(anyhow!("queue state was not polled")) },
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum QueueState {
     Pending,
-    Running, 
+    Running,
+    Active(String),
     NotInQueue,
-    Other(String),
-    #[default]
-    Unknown,
 }
 
 impl From<&str> for QueueState {
     fn from(value: &str) -> Self {
-        match value.trim() {
+        let state = value.trim();
+
+        match state {
             "" => QueueState::NotInQueue,
             "PENDING" => QueueState::Pending,
             "RUNNING" => QueueState::Running,
-            s => QueueState::Other(s.to_owned())
+            "COMPLETING" | "CONFIGURING" | "RESIZING" | "REQUEUED" | "REQUEUE_FED"
+            | "REQUEUE_HOLD" | "SIGNALING" | "SUSPENDED" | "STAGE_OUT" | "STOPPED" => {
+                QueueState::Active(state.to_owned())
+            }
+            "BOOT_FAIL" | "CANCELLED" | "COMPLETED" | "DEADLINE" | "FAILED" | "NODE_FAIL"
+            | "OUT_OF_MEMORY" | "PREEMPTED" | "TIMEOUT" => QueueState::NotInQueue,
+            other => QueueState::Active(other.to_owned()),
         }
     }
 }
@@ -82,12 +87,12 @@ fn query_pending(job_id: &JobId) -> Result<JobState> {
         .split_once('|')
         .ok_or_else(|| anyhow!("could not parse query in new_pending"))?;
 
-    let pending_data = PendingData { 
-        jobscript: JobScript::new(job_script.into()), 
-        job_id: job_id.to_owned(), 
-        submit_time: submit_time.to_owned() 
+    let pending_data = PendingData {
+        jobscript: JobScript::new(job_script.into()),
+        job_id: job_id.to_owned(),
+        submit_time: submit_time.to_owned(),
     };
-    
+
     Ok(JobState::Pending(pending_data))
 }
 
@@ -105,22 +110,19 @@ fn query_running(job_id: &JobId) -> Result<JobState> {
     }
 
     let query_out = String::from_utf8_lossy(&query_out.stdout);
-    let fields: Vec<_> = query_out
-        .trim()
-        .split('|')
-        .collect();
+    let fields: Vec<_> = query_out.trim().split('|').collect();
 
     let &[submit_time, job_script, node_list, uptime] = fields.as_slice() else {
         return Err(anyhow!("Expected fields: 4, got {}", fields.len()));
     };
 
     let node_list = node_list.split(',').map(|s| s.to_owned()).collect();
-    
-    let running_data = RunningData { 
-        jobscript: JobScript::new(job_script.into()), 
+
+    let running_data = RunningData {
+        jobscript: JobScript::new(job_script.into()),
         job_id: job_id.to_owned(),
         nodes: node_list,
-        uptime: uptime.to_owned() 
+        uptime: uptime.to_owned(),
     };
 
     Ok(JobState::Running(running_data))
@@ -141,10 +143,7 @@ fn query_finished(job_id: &JobId) -> Result<JobState> {
     }
 
     let query_out = String::from_utf8_lossy(&query_out.stdout);
-    let fields: Vec<_> = query_out
-        .trim()
-        .splitn(5, '|')
-        .collect();
+    let fields: Vec<_> = query_out.trim().splitn(5, '|').collect();
 
     let &[start, end, elapsed, status, jobscript] = fields.as_slice() else {
         return Err(anyhow!("Expected fields: 5, got {}", fields.len()));
@@ -157,18 +156,18 @@ fn query_finished(job_id: &JobId) -> Result<JobState> {
         .parse()?;
 
     let jobscript = if let Some(jobscript) = jobscript.split_whitespace().last() {
-        jobscript   
+        jobscript
     } else {
         return Err(anyhow!("Could not parse jobscript from submit line"));
     };
 
-    let finished_data = FinishedData { 
-        jobscript: JobScript::new(jobscript.into()), 
-        job_id: job_id.to_owned(), 
-        start_time: start.to_owned(), 
+    let finished_data = FinishedData {
+        jobscript: JobScript::new(jobscript.into()),
+        job_id: job_id.to_owned(),
+        start_time: start.to_owned(),
         end_time: end.to_owned(),
         runtime: elapsed.to_owned(),
-        final_status: final_status.to_owned()
+        final_status: final_status.to_owned(),
     };
 
     Ok(JobState::Finished(finished_data))
@@ -205,8 +204,8 @@ mod tests {
     }
 
     fn slurm_test_job_id() -> JobId {
-        let job_id = std::env::var("SLURM_TEST_JOB_ID")
-            .expect("set SLURM_TEST_JOB_ID to run this test");
+        let job_id =
+            std::env::var("SLURM_TEST_JOB_ID").expect("set SLURM_TEST_JOB_ID to run this test");
         JobId::new(job_id).unwrap()
     }
 
@@ -229,10 +228,29 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_queue_state_is_other() {
+    fn transition_queue_state_is_active() {
         assert_eq!(
             QueueState::from("CONFIGURING"),
-            QueueState::Other("CONFIGURING".to_owned())
+            QueueState::Active("CONFIGURING".to_owned())
+        );
+        assert_eq!(
+            QueueState::from(" COMPLETING\n"),
+            QueueState::Active("COMPLETING".to_owned())
+        );
+    }
+
+    #[test]
+    fn terminal_queue_state_queries_accounting() {
+        assert_eq!(QueueState::from("FAILED"), QueueState::NotInQueue);
+        assert_eq!(QueueState::from("TIMEOUT"), QueueState::NotInQueue);
+        assert_eq!(QueueState::from("OUT_OF_MEMORY"), QueueState::NotInQueue);
+    }
+
+    #[test]
+    fn unknown_queue_state_is_still_active() {
+        assert_eq!(
+            QueueState::from("SOME_NEW_STATE"),
+            QueueState::Active("SOME_NEW_STATE".to_owned())
         );
     }
 
