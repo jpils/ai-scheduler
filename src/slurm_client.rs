@@ -77,7 +77,12 @@ fn query_pending(job_id: &JobId) -> Result<JobState> {
     }
 
     let query_out = String::from_utf8_lossy(&query_out.stdout);
-    let (submit_time, job_script) = query_out
+    let Some(first_line) = query_out
+        .lines()
+        .find(|line| !line.trim().is_empty()) else {
+        return query_finished(job_id);
+    };
+    let (submit_time, job_script) = first_line
         .trim()
         .split_once('|')
         .ok_or_else(|| anyhow!("could not parse query in new_pending"))?;
@@ -105,7 +110,12 @@ fn query_running(job_id: &JobId) -> Result<JobState> {
     }
 
     let query_out = String::from_utf8_lossy(&query_out.stdout);
-    let fields: Vec<_> = query_out
+    let Some(first_line) = query_out
+        .lines()
+        .find(|line| !line.trim().is_empty()) else {
+        return query_finished(job_id);
+    };
+    let fields: Vec<_> = first_line
         .trim()
         .split('|')
         .collect();
@@ -141,7 +151,11 @@ fn query_finished(job_id: &JobId) -> Result<JobState> {
     }
 
     let query_out = String::from_utf8_lossy(&query_out.stdout);
-    let fields: Vec<_> = query_out
+    let first_line = query_out
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| anyhow!("finished query returned no rows"))?;
+    let fields: Vec<_> = first_line
         .trim()
         .splitn(5, '|')
         .collect();
@@ -150,22 +164,40 @@ fn query_finished(job_id: &JobId) -> Result<JobState> {
         return Err(anyhow!("Expected fields: 5, got {}", fields.len()));
     };
 
-    let final_status: FinalJobStatus = status
+    let status_token = status
         .split_whitespace()
         .next()
-        .ok_or_else(|| anyhow!("missing final status"))?
-        .parse()?;
+        .ok_or_else(|| anyhow!("missing final status"))?;
 
     let jobscript = if let Some(jobscript) = jobscript.split_whitespace().last() {
-        jobscript   
+        jobscript
     } else {
         return Err(anyhow!("Could not parse jobscript from submit line"));
     };
 
-    let finished_data = FinishedData { 
-        jobscript: JobScript::new(jobscript.into()), 
-        job_id: job_id.to_owned(), 
-        start_time: start.to_owned(), 
+    if matches!(status_token, "RUNNING" | "COMPLETING") {
+        return Ok(JobState::Running(RunningData {
+            jobscript: JobScript::new(jobscript.into()),
+            job_id: job_id.to_owned(),
+            nodes: Vec::new(),
+            uptime: elapsed.to_owned(),
+        }));
+    }
+
+    if matches!(status_token, "PENDING" | "CONFIGURING") {
+        return Ok(JobState::Pending(PendingData {
+            jobscript: JobScript::new(jobscript.into()),
+            job_id: job_id.to_owned(),
+            submit_time: start.to_owned(),
+        }));
+    }
+
+    let final_status: FinalJobStatus = status_token.parse()?;
+
+    let finished_data = FinishedData {
+        jobscript: JobScript::new(jobscript.into()),
+        job_id: job_id.to_owned(),
+        start_time: start.to_owned(),
         end_time: end.to_owned(),
         runtime: elapsed.to_owned(),
         final_status: final_status.to_owned()
@@ -185,13 +217,30 @@ fn get_queue_state(job_id: &JobId) -> Result<QueueState> {
 
     let query_out_str = String::from_utf8_lossy(&query_out.stdout);
 
-    if query_out_str.trim().is_empty() && query_out.status.success() {
+    if query_out_str.trim().is_empty() {
         return Ok(QueueState::NotInQueue);
     } else if !query_out.status.success() {
-        return Err(anyhow!("query failed"));
+        // Slurm can return non-zero for completed/expired array jobs even when
+        // sacct can report the final state. Fall through to sacct instead of
+        // failing the pipeline watcher.
+        return Ok(QueueState::NotInQueue);
     }
 
-    let queue_state: QueueState = query_out_str.trim().into();
+    let states: Vec<_> = query_out_str
+        .lines()
+        .map(str::trim)
+        .filter(|state| !state.is_empty())
+        .collect();
+
+    if states.iter().any(|state| matches!(*state, "RUNNING" | "COMPLETING")) {
+        return Ok(QueueState::Running);
+    }
+
+    if states.iter().any(|state| matches!(*state, "PENDING" | "CONFIGURING")) {
+        return Ok(QueueState::Pending);
+    }
+
+    let queue_state: QueueState = states.first().copied().unwrap_or("").into();
 
     Ok(queue_state)
 }

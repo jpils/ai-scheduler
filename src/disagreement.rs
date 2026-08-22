@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy)]
 pub struct DisagreementSettings {
     pub max_selected: usize,
+    pub bootstrap_max_selected: Option<usize>,
     pub min_rrmse: f64,
     pub max_rrmse: f64,
 }
@@ -15,6 +16,7 @@ impl Default for DisagreementSettings {
     fn default() -> Self {
         Self {
             max_selected: 8,
+            bootstrap_max_selected: None,
             min_rrmse: 0.02,
             max_rrmse: 0.40,
         }
@@ -239,10 +241,20 @@ impl DisagreementWorkspace {
             })?;
         }
 
-        let python_script = scheduler_home()
+        let project_python_script = project_dir
+            .join("external")
+            .join("alchemist")
+            .join("python")
+            .join("committee_disagreement.py");
+        let installed_python_script = scheduler_home()
             .map_err(|error| error.to_string())?
             .join("python")
             .join("committee_disagreement.py");
+        let python_script = if project_python_script.is_file() {
+            project_python_script
+        } else {
+            installed_python_script
+        };
 
         if !python_script.is_file() {
             return Err(format!(
@@ -264,6 +276,12 @@ impl DisagreementWorkspace {
 
         let script_path = generation_dir.join("submit_disagreement.sh");
 
+        let max_selected = if generation == 0 {
+            settings.bootstrap_max_selected.unwrap_or(settings.max_selected)
+        } else {
+            settings.max_selected
+        };
+
         render_template(
             &template_path,
             &script_path,
@@ -278,7 +296,7 @@ impl DisagreementWorkspace {
                     "selected_structures",
                     absolute_path_string(&selected_structures)?,
                 ),
-                ("max_selected", settings.max_selected.to_string()),
+                ("max_selected", max_selected.to_string()),
                 ("min_rrmse", settings.min_rrmse.to_string()),
                 ("max_rrmse", settings.max_rrmse.to_string()),
             ],
@@ -772,6 +790,19 @@ fn read_lammps_species(input_lmp: &Path) -> Result<Vec<String>, String> {
         .map_err(|error| format!("Failed to read {}: {}", input_lmp.display(), error))?;
 
     for line in text.lines() {
+        let raw_line = line.trim();
+
+        if let Some(mapping) = raw_line.strip_prefix("# alchemist_species") {
+            let fields: Vec<&str> = mapping.split_whitespace().collect();
+
+            if !fields.is_empty() {
+                return fields
+                    .iter()
+                    .map(|field| symbol_from_token(field))
+                    .collect();
+            }
+        }
+
         let line = line.split('#').next().unwrap_or("").trim();
         let fields: Vec<&str> = line.split_whitespace().collect();
 
@@ -786,7 +817,7 @@ fn read_lammps_species(input_lmp: &Path) -> Result<Vec<String>, String> {
     }
 
     Err(format!(
-        "Could not find a parseable 'pair_coeff * * ...' element mapping in {}",
+        "Could not find a parseable '# alchemist_species ...' or 'pair_coeff * * ...' element mapping in {}",
         input_lmp.display()
     ))
 }

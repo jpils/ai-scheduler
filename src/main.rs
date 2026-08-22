@@ -32,6 +32,7 @@ use pipeline::{
     QbcStep,
     StepCtx,
     TrainingStep,
+    BootstrapModelStep,
 };
 use pipeline::runner::{DryRunner, LocalRunner, Runner, SlurmRunner};
 
@@ -78,6 +79,7 @@ struct CommitteeConfig {
 struct DisagreementConfig {
     mode: Option<DisagreementMode>,
     max_selected: Option<usize>,
+    bootstrap_max_selected: Option<usize>,
     min_rrmse: Option<f64>,
     max_rrmse: Option<f64>,
 }
@@ -112,6 +114,7 @@ impl DisagreementConfig {
 
         DisagreementSettings {
             max_selected: self.max_selected.unwrap_or(defaults.max_selected),
+            bootstrap_max_selected: self.bootstrap_max_selected,
             min_rrmse: self.min_rrmse.unwrap_or(defaults.min_rrmse),
             max_rrmse: self.max_rrmse.unwrap_or(defaults.max_rrmse),
         }
@@ -270,19 +273,39 @@ fn main() {
         let xyz = setup_dir.join("training").join("seed_dataset.xyz");
 
         if extxyz.is_file() {
-            extxyz
+            Some(extxyz)
         } else if xyz.is_file() {
-            xyz
+            Some(xyz)
         } else {
-            eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
-            eprintln!("Missing seed dataset. Expected one of:");
-            eprintln!("    {}", extxyz.display());
-            eprintln!("    {}", xyz.display());
-            return;
+            None
         }
     };
 
-    println!(" ✓ Found seed dataset: {}", seed_dataset.display());
+    let seed_structure = {
+        let extxyz = setup_dir.join("training").join("seed_structure.extxyz");
+        let xyz = setup_dir.join("training").join("seed_structure.xyz");
+
+        if extxyz.is_file() {
+            Some(extxyz)
+        } else if xyz.is_file() {
+            Some(xyz)
+        } else {
+            None
+        }
+    };
+
+    let bootstrap_from_structure = seed_dataset.is_none() && seed_structure.is_some();
+
+    if let Some(seed_dataset) = &seed_dataset {
+        println!(" ✓ Found seed dataset: {}", seed_dataset.display());
+    } else if let Some(seed_structure) = &seed_structure {
+        println!(" ✓ Found bootstrap seed structure: {}", seed_structure.display());
+        println!("   No labeled seed dataset found; generation 0 will run MD/QBC/VASP first.");
+    } else {
+        eprintln!("❌ PRE-FLIGHT VALIDATION FAILED!");
+        eprintln!("Missing seed input. Expected seed_dataset.extxyz/.xyz or seed_structure.extxyz/.xyz in setup/training");
+        return;
+    }
 
     for vasp_input in ["INCAR", "KPOINTS", "POTCAR"] {
         let path = setup_dir.join("vasp").join(vasp_input);
@@ -303,7 +326,8 @@ fn main() {
     }
 
     // Check LAMMPS generation files
-    for gen_num in 1..=total_generations {
+    let first_checked_generation = if bootstrap_from_structure { 0 } else { 1 };
+    for gen_num in first_checked_generation..=total_generations {
         if let Err(e) = LammpsManager::find_input_file(&setup_dir, gen_num) {
             println!(
                 "❌ PRE-FLIGHT VALIDATION FAILED! Gen {} missing input. Details: {}",
@@ -383,7 +407,9 @@ fn main() {
         },
     };
 
-    for gen_num in 1..=total_generations {
+    let first_generation = if bootstrap_from_structure { 0 } else { 1 };
+
+    for gen_num in first_generation..=total_generations {
         println!(
             "\n🌀 Starting Generation {}/{}...",
             gen_num, total_generations
@@ -428,33 +454,61 @@ fn main() {
             )
         };
 
-        let pipeline = Pipeline::new(vec![
-            Box::new(TrainingStep::new(
-                pipeline_backend,
-                step_ctx(),
-                config.committee.members,
-                checkpoint_file.clone(),
-                pipeline_energy_mode,
-            )),
-            Box::new(MdStep::new(
-                MdEngine::Lammps,
-                step_ctx(),
-                config.committee.members,
-                model_package,
-            )),
-            Box::new(QbcStep::new(
-                QbcMethod::Rrmsfd,
-                step_ctx(),
-                pipeline_backend,
-                config.committee.members,
-                disagreement_settings,
-                disagreement_mode,
-            )),
-            Box::new(DftStep::new(
-                DftCode::Vasp,
-                step_ctx(),
-            )),
-        ]);
+        let pipeline = if bootstrap_from_structure && gen_num == 0 {
+            Pipeline::new(vec![
+                Box::new(BootstrapModelStep::new(
+                    pipeline_backend,
+                    config.committee.members,
+                    checkpoint_file.clone(),
+                )),
+                Box::new(MdStep::new(
+                    MdEngine::Lammps,
+                    step_ctx(),
+                    config.committee.members,
+                    model_package,
+                )),
+                Box::new(QbcStep::new(
+                    QbcMethod::Rrmsfd,
+                    step_ctx(),
+                    pipeline_backend,
+                    config.committee.members,
+                    disagreement_settings,
+                    disagreement_mode,
+                )),
+                Box::new(DftStep::new(
+                    DftCode::Vasp,
+                    step_ctx(),
+                )),
+            ])
+        } else {
+            Pipeline::new(vec![
+                Box::new(TrainingStep::new(
+                    pipeline_backend,
+                    step_ctx(),
+                    config.committee.members,
+                    checkpoint_file.clone(),
+                    pipeline_energy_mode,
+                )),
+                Box::new(MdStep::new(
+                    MdEngine::Lammps,
+                    step_ctx(),
+                    config.committee.members,
+                    model_package,
+                )),
+                Box::new(QbcStep::new(
+                    QbcMethod::Rrmsfd,
+                    step_ctx(),
+                    pipeline_backend,
+                    config.committee.members,
+                    disagreement_settings,
+                    disagreement_mode,
+                )),
+                Box::new(DftStep::new(
+                    DftCode::Vasp,
+                    step_ctx(),
+                )),
+            ])
+        };
 
         let pipeline_ctx = PipelineCtx {
             project_dir: project_dir.clone(),

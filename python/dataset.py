@@ -113,9 +113,10 @@ def load_generation(project_dir, generation_num):
     return dataset
 
 
+
 def find_seed_dataset(project_dir):
     """
-    Locate the user-provided seed dataset.
+    Locate the user-provided labeled seed dataset.
     """
 
     setup_dir = os.path.join(project_dir, "setup", "training")
@@ -133,6 +134,18 @@ def find_seed_dataset(project_dir):
     raise RuntimeError(
         f"No seed dataset found. Expected {expected}"
     )
+
+
+def seed_dataset_exists(project_dir):
+    """
+    Whether a labeled seed dataset already exists.
+    """
+
+    try:
+        find_seed_dataset(project_dir)
+        return True
+    except RuntimeError:
+        return False
 
 
 def load_seed_dataset(project_dir):
@@ -166,10 +179,14 @@ def load_accumulated_dataset(project_dir, generation_num):
     1 through N-1.
     """
 
-    dataset = load_seed_dataset(project_dir)
+    if seed_dataset_exists(project_dir):
+        dataset = load_seed_dataset(project_dir)
+    else:
+        print("[+] No labeled seed dataset found; using VASP labels from bootstrap generation 0.")
+        dataset = load_generation(project_dir, 0)
 
     if generation_num == 1:
-        print("[+] Generation 1 dataset source: seed dataset only.")
+        print("[+] Generation 1 dataset source: seed/bootstrap dataset only.")
         return dataset
 
     for source_generation in range(1, generation_num):
@@ -244,7 +261,9 @@ def apply_energy_shift(dataset, checkpoint_path):
 
 def split_dataset(dataset):
     """
-    Standard 80 / 10 / 10 split.
+    Fixed split for KTaO3 active learning: 20 train / 5 validation / 5 test
+    when at least 30 configurations are available. Smaller datasets use all
+    available configurations for training.
     """
 
     np.random.seed(42)
@@ -253,12 +272,15 @@ def split_dataset(dataset):
 
     n = len(dataset)
 
-    n_validation = int(0.1 * n)
-    n_test = int(0.1 * n)
-    n_train = n - n_validation - n_test
-
-    if n_train <= 0:
-
+    if n >= 30:
+        n_train = 20
+        n_validation = 5
+        n_test = 5
+    elif n >= 3:
+        n_validation = max(1, round(0.15 * n))
+        n_test = max(1, round(0.15 * n))
+        n_train = n - n_validation - n_test
+    else:
         n_train = n
         n_validation = 0
         n_test = 0
@@ -280,6 +302,7 @@ def split_dataset(dataset):
         dataset[i]
         for i in indices[
             n_train + n_validation:
+            n_train + n_validation + n_test
         ]
     ]
 

@@ -1,18 +1,32 @@
 [workspace]
 authors = ["jpils <pilsj00@gmail.com>"]
-channels = ["conda-forge"]
+channels = ["metatensor", "conda-forge"]
+# lammps-metatomic CUDA builds need dependencies from both channels.
+channel-priority = "disabled"
 name = "alchemist"
 platforms = ["linux-64"]
 version = "0.1.0"
 
 [feature.common.dependencies]
-python = ">=3.14,<3.15"
+python = ">=3.12,<3.13"
 numpy = "*"
 
 [feature.common.pypi-dependencies]
 ase = "*"
 
+[feature.upet.dependencies]
+# LAMMPS with ML-METATOMIC + CUDA/KOKKOS for NVIDIA A100 (Ampere 80) on Leonardo.
+# Provides the `lmp` binary used by setup/jobscripts/md_array.sh.template.
+lammps-metatomic = { version = "*", build = "cuda*AMPERE80*nompi*" }
+
+[pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu121"]
+
 [feature.upet.pypi-dependencies]
+# UPET/PET needs torch.nn.RMSNorm (torch >=2.4). nvalchemi custom ops need
+# newer torch schema handling than 2.4. Use CUDA 12.1 wheel for Leonardo driver 12.2.
+torch = "==2.5.1+cu121"
+nvalchemi-toolkit-ops = "==0.3.0"
 upet = ">=0.2.6,<0.3"
 
 # We'll fill this in once we know exactly how we're using n2p2.

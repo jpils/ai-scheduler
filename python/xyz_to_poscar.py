@@ -2,6 +2,25 @@ import sys
 from ase.io import read, write
 
 
+def sort_atoms_for_vasp(atoms):
+    """
+    VASP POSCAR requires one species entry per contiguous species block.
+
+    ASE preserves input atom order by default; LAMMPS dumps often interleave
+    species (K Ta O K Ta O ...), which makes ASE write repeated species labels
+    and VASP rejects the POSCAR. Keep a stable order with common KTaO3 species
+    first, then any remaining species alphabetically.
+    """
+
+    preferred = {"K": 0, "Ta": 1, "O": 2}
+    symbols = atoms.get_chemical_symbols()
+    indices = sorted(
+        range(len(atoms)),
+        key=lambda i: (preferred.get(symbols[i], 100), symbols[i], i),
+    )
+    return atoms[indices]
+
+
 def main():
     if len(sys.argv) < 3:
         print("Invalid arguments.", file=sys.stderr)
@@ -40,7 +59,8 @@ def main():
 
         try:
             atoms = read(input_path, index=target_index)
-            write(output_path, atoms, format="vasp")
+            atoms = sort_atoms_for_vasp(atoms)
+            write(output_path, atoms, format="vasp", vasp5=True, direct=False)
         except Exception as e:
             print(
                 f"ASE Conversion Error at index {target_index}: {e}",

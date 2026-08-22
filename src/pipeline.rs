@@ -8,7 +8,7 @@ use crate::{
     types::{FinalJobStatus, FinishedData, JobId, JobScript},
     vasp::VaspWorkspace,
 };
-use std::{path::{Path, PathBuf}, process::Command, time::Duration};
+use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
 use anyhow::{Result, anyhow};
 
 pub(crate) enum StepPlan {
@@ -158,6 +158,105 @@ impl QbcMethod {
     }
 }
 
+pub(crate) struct BootstrapModelStep {
+    backend: ModelBackend,
+    committee_members: usize,
+    checkpoint: Option<PathBuf>,
+}
+
+impl BootstrapModelStep {
+    pub(crate) fn new(
+        backend: ModelBackend,
+        committee_members: usize,
+        checkpoint: Option<PathBuf>,
+    ) -> Self {
+        Self { backend, committee_members, checkpoint }
+    }
+}
+
+impl PipelineStep for BootstrapModelStep {
+    fn name(&self) -> &str {
+        "bootstrap model"
+    }
+
+    fn validate_required_files(&self, _pipeline_ctx: &PipelineCtx) -> Result<()> {
+        if self.committee_members == 0 {
+            return Err(anyhow!("bootstrap model step requires at least one committee member"));
+        }
+
+        match self.backend {
+            ModelBackend::Upet => {
+                let checkpoint = self.checkpoint.as_deref()
+                    .ok_or_else(|| anyhow!("UPET bootstrap requires a checkpoint"))?;
+                if !checkpoint.is_file() {
+                    return Err(anyhow!("checkpoint does not exist: {}", checkpoint.display()));
+                }
+            }
+            ModelBackend::N2p2 => {
+                return Err(anyhow!("bootstrap from a single unlabeled structure is only implemented for UPET"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn prepare(&self, pipeline_ctx: &PipelineCtx) -> Result<StepPlan> {
+        let checkpoint = self.checkpoint.as_deref()
+            .ok_or_else(|| anyhow!("UPET bootstrap requires a checkpoint"))?;
+
+        let models_dir = pipeline_ctx.project_dir
+            .join("training")
+            .join(format!("generation_{}", pipeline_ctx.generation))
+            .join("models");
+
+        fs::create_dir_all(&models_dir)?;
+
+        let scheduler_dir = scheduler_home()
+            .map_err(|error| anyhow!(error.to_string()))?;
+        let manifest = scheduler_dir.join("pixi.toml");
+
+        for member_index in 0..self.committee_members {
+            let member_dir = models_dir.join(format!("member_{member_index:03}"));
+            fs::create_dir_all(&member_dir)?;
+
+            let output_model = member_dir.join("model.pt");
+            let status = Command::new("pixi")
+                .current_dir(&scheduler_dir)
+                .arg("run")
+                .arg("-e")
+                .arg("upet")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .arg("mtt")
+                .arg("export")
+                .arg(checkpoint)
+                .arg("-o")
+                .arg(&output_model)
+                .status()?;
+
+            if !status.success() {
+                return Err(anyhow!(
+                    "failed to export UPET checkpoint {} to {}",
+                    checkpoint.display(),
+                    output_model.display(),
+                ));
+            }
+        }
+
+        println!(
+            "[+] Bootstrapped {} exported UPET model packages from {}.",
+            self.committee_members,
+            checkpoint.display(),
+        );
+
+        Ok(StepPlan::LocalComplete)
+    }
+
+    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)
+    }
+}
+
 pub(crate) struct MdStep {
     engine: MdEngine,
     ctx: StepCtx,
@@ -299,7 +398,9 @@ impl PipelineStep for DftStep {
                 config_index,
             )?;
 
-            VaspWorkspace::create_mock_outcar(&run_dir, config_index)?;
+            if pipeline_ctx.dry_run {
+                VaspWorkspace::create_mock_outcar(&run_dir, config_index)?;
+            }
         }
 
         let job_script = VaspWorkspace::create_array_script(
@@ -312,8 +413,14 @@ impl PipelineStep for DftStep {
         Ok(StepPlan::Slurm(JobScript::new(job_script)))
     }
 
-    fn on_completion(&self, job_state: &FinishedData, _pipeline_ctx: &PipelineCtx) -> Result<()> {
-        ensure_completed(job_state)
+    fn on_completion(&self, job_state: &FinishedData, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        ensure_completed(job_state)?;
+
+        if pipeline_ctx.generation == 0 {
+            write_bootstrap_seed_dataset(&pipeline_ctx.project_dir)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -449,7 +556,7 @@ impl PipelineStep for TrainingStep {
         ensure_completed(job_state)?;
 
         match self.model_backend {
-            ModelBackend::Upet => TrainingWorkspace::create_mock_upet_models(
+            ModelBackend::Upet => TrainingWorkspace::verify_upet_models(
                 &pipeline_ctx.project_dir,
                 pipeline_ctx.generation,
                 self.committee_members,
@@ -596,6 +703,57 @@ fn prepare_dry_training_dataset(
     }
 
     Ok(())
+}
+
+fn write_bootstrap_seed_dataset(project_dir: &Path) -> Result<()> {
+    let setup_training = project_dir.join("setup").join("training");
+    let seed_extxyz = setup_training.join("seed_dataset.extxyz");
+
+    if seed_extxyz.is_file() {
+        println!(
+            "[+] Seed dataset already exists; not overwriting {}.",
+            seed_extxyz.display()
+        );
+        return Ok(());
+    }
+
+    let script = r#"
+import glob
+import os
+import sys
+import ase.io
+
+project_dir = sys.argv[1]
+out_path = os.path.join(project_dir, "setup", "training", "seed_dataset.extxyz")
+outcars = sorted(glob.glob(os.path.join(project_dir, "vasp_runs", "generation_0", "config_*", "OUTCAR")))
+if not outcars:
+    raise SystemExit("no bootstrap OUTCAR files found")
+frames = []
+for outcar in outcars:
+    try:
+        frames.append(ase.io.read(outcar, format="vasp-out", index=-1))
+    except Exception as err:
+        print(f"warning: failed to parse {outcar}: {err}", file=sys.stderr)
+if not frames:
+    raise SystemExit("no bootstrap OUTCAR files could be parsed")
+ase.io.write(out_path, frames, format="extxyz")
+print(f"[+] Wrote bootstrap seed dataset: {out_path} ({len(frames)} frames)")
+"#;
+
+    let status = pixi_python("upet")
+        .map_err(|error| anyhow!(error.to_string()))?
+        .arg("-c")
+        .arg(script)
+        .arg(project_dir)
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "failed to write bootstrap seed dataset from generation 0 OUTCARs"
+        ))
+    }
 }
 
 fn dry_seed_dataset(project_dir: &Path) -> Result<PathBuf> {

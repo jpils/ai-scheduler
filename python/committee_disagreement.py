@@ -2,7 +2,10 @@ import argparse
 import gc
 import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 import numpy as np
 from ase.data import chemical_symbols
@@ -22,6 +25,12 @@ def parse_args():
     parser.add_argument("--min-rrmse", type=float, default=0.02)
     parser.add_argument("--max-rrmse", type=float, default=0.40)
     parser.add_argument("--device", default=os.environ.get("ALCHEMIST_DEVICE", "cuda"))
+    parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=int(os.environ.get("ALCHEMIST_QBC_FRAME_STRIDE", "1")),
+        help="Evaluate every Nth trajectory frame for QBC selection.",
+    )
     return parser.parse_args()
 
 
@@ -30,6 +39,9 @@ def main():
 
     if args.max_selected < 1:
         raise SystemExit("--max-selected must be greater than zero")
+
+    if args.frame_stride < 1:
+        raise SystemExit("--frame-stride must be greater than zero")
 
     if not os.path.isfile(args.trajectory):
         raise SystemExit(f"Trajectory not found: {args.trajectory}")
@@ -43,14 +55,17 @@ def main():
     run_dir = os.path.dirname(args.trajectory)
     symbols = read_lammps_symbols(os.path.join(run_dir, "input.lmp"))
     model_dirs = find_member_dirs(args.committee_models)
+
+    if args.backend == "upet" and os.environ.get("ALCHEMIST_UPET_QBC_ENGINE", "ase") == "lammps":
+        run_lammps_upet_disagreement(args, symbols, model_dirs)
+        return
+
     calcs = build_calculators(args.backend, model_dirs, args.device)
 
     scores = []
     selected_frames = []
 
-    for frame_index, atoms in enumerate(
-        iread(args.trajectory, index=":", format="lammps-dump-text")
-    ):
+    for frame_index, atoms in enumerate(iter_strided_frames(args.trajectory, args.frame_stride)):
         if symbols:
             atoms.set_chemical_symbols(symbols_for_frame(symbols, atoms))
 
@@ -103,10 +118,181 @@ def main():
     write(os.path.join(args.output_dir, "selected.xyz"), selected, format="extxyz")
     write(args.selected_structures, selected, format="extxyz")
 
-    print(f"[+] Evaluated {len(scores)} frames with {len(calcs)} committee members.")
+    print(f"[+] Evaluated {len(scores)} frames with {len(calcs)} committee members (stride={args.frame_stride}).")
     print(f"[+] Selected {len(selected)} frames.")
     print(f"[+] Scores: {os.path.join(args.output_dir, 'scores.csv')}")
     print(f"[+] Selected structures: {args.selected_structures}")
+
+
+def run_lammps_upet_disagreement(args, symbols, model_dirs):
+    lmp = shutil.which("lmp")
+    if not lmp:
+        raise SystemExit("LAMMPS binary `lmp` not found in PATH for UPET/LAMMPS QBC")
+
+    run_dir = os.path.dirname(args.trajectory)
+    box = read_lammps_box(os.path.join(run_dir, "lmp.data"))
+
+    scores = []
+    selected_frames = []
+
+    for frame_index, atoms in enumerate(iter_strided_frames(args.trajectory, args.frame_stride)):
+        if symbols:
+            atoms.set_chemical_symbols(symbols_for_frame(symbols, atoms))
+
+        forces = []
+        for calc_index, model_dir in enumerate(model_dirs):
+            model_path = find_first_file(model_dir, ["model.pt", "mock_trained_model.pt"])
+            if model_path.endswith("mock_trained_model.pt"):
+                raise SystemExit(f"Refusing to run LAMMPS QBC with mock model: {model_path}")
+            print(f"[+] Frame {frame_index}: evaluating member {calc_index} with LAMMPS/metatomic")
+            forces.append(run_lammps_force_eval(lmp, atoms, symbols, box, model_path, args.device))
+
+        forces = np.asarray(forces)
+        rms_abs, rms_rel_mean = force_rrmse(forces)
+        scores.append(
+            {
+                "frame_index": frame_index,
+                "timestep": atoms.info.get("Time", atoms.info.get("timestep", frame_index)),
+                "rms_abs": rms_abs,
+                "rrmse_forces": rms_rel_mean,
+                "selected": False,
+            }
+        )
+        atoms.info["rms_abs_forces"] = rms_abs
+        atoms.info["rrmse_forces"] = rms_rel_mean
+        selected_frames.append(atoms.copy())
+
+    selected_indices = select_indices(
+        scores,
+        max_selected=args.max_selected,
+        min_rrmse=args.min_rrmse,
+        max_rrmse=args.max_rrmse,
+    )
+
+    for index in selected_indices:
+        scores[index]["selected"] = True
+
+    write_scores(os.path.join(args.output_dir, "scores.csv"), scores)
+    selected = [selected_frames[index] for index in selected_indices]
+
+    if not selected:
+        raise SystemExit(
+            "No frames passed the disagreement selection window. "
+            "Adjust min_rrmse/max_rrmse or inspect scores.csv."
+        )
+
+    write(os.path.join(args.output_dir, "selected.xyz"), selected, format="extxyz")
+    write(args.selected_structures, selected, format="extxyz")
+
+    print(f"[+] Evaluated {len(scores)} frames with {len(model_dirs)} LAMMPS/metatomic committee members (stride={args.frame_stride}).")
+    print(f"[+] Selected {len(selected)} frames.")
+    print(f"[+] Scores: {os.path.join(args.output_dir, 'scores.csv')}")
+    print(f"[+] Selected structures: {args.selected_structures}")
+
+
+def read_lammps_box(path):
+    bounds = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) == 4 and parts[2:] == ["xlo", "xhi"]:
+                bounds["x"] = (float(parts[0]), float(parts[1]))
+            elif len(parts) == 4 and parts[2:] == ["ylo", "yhi"]:
+                bounds["y"] = (float(parts[0]), float(parts[1]))
+            elif len(parts) == 4 and parts[2:] == ["zlo", "zhi"]:
+                bounds["z"] = (float(parts[0]), float(parts[1]))
+    if set(bounds) != {"x", "y", "z"}:
+        raise SystemExit(f"Could not read orthogonal LAMMPS box from {path}")
+    return bounds
+
+
+def run_lammps_force_eval(lmp, atoms, symbols, box, model_path, device):
+    with tempfile.TemporaryDirectory(prefix="alchemist-qbc-") as tmp:
+        data_path = os.path.join(tmp, "frame.data")
+        input_path = os.path.join(tmp, "in.force")
+        forces_path = os.path.join(tmp, "forces.dump")
+        write_lammps_frame_data(data_path, atoms, symbols, box)
+        with open(input_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "units metal\n"
+                "atom_style atomic\n"
+                "boundary p p p\n"
+                "read_data frame.data\n"
+                f"pair_style metatomic {model_path} device {device}\n"
+                "pair_coeff * * 19 73 8\n"
+                "neighbor 2.0 bin\n"
+                "neigh_modify every 1 delay 0 check yes\n"
+                "dump f all custom 1 forces.dump id fx fy fz\n"
+                "dump_modify f sort id first yes\n"
+                "run 0\n"
+            )
+        result = subprocess.run(
+            [lmp, "-in", input_path],
+            cwd=tmp,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SystemExit(
+                "LAMMPS/metatomic force evaluation failed\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+        return read_lammps_forces(forces_path, len(atoms))
+
+
+def write_lammps_frame_data(path, atoms, symbols, box):
+    symbol_to_type = {symbol: index + 1 for index, symbol in enumerate(symbols)}
+    masses = {"K": 39.0983, "Ta": 180.94788, "O": 15.999}
+    positions = atoms.get_positions()
+    atom_symbols = atoms.get_chemical_symbols()
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("alchemist QBC frame\n\n")
+        handle.write(f"{len(atoms)} atoms\n")
+        handle.write(f"{len(symbols)} atom types\n\n")
+        handle.write(f"{box['x'][0]:.12f} {box['x'][1]:.12f} xlo xhi\n")
+        handle.write(f"{box['y'][0]:.12f} {box['y'][1]:.12f} ylo yhi\n")
+        handle.write(f"{box['z'][0]:.12f} {box['z'][1]:.12f} zlo zhi\n\n")
+        handle.write("Masses\n\n")
+        for symbol in symbols:
+            handle.write(f"{symbol_to_type[symbol]} {masses.get(symbol, 1.0)} # {symbol}\n")
+        handle.write("\nAtoms # atomic\n\n")
+        for atom_id, (symbol, pos) in enumerate(zip(atom_symbols, positions), start=1):
+            handle.write(
+                f"{atom_id} {symbol_to_type[symbol]} "
+                f"{pos[0]:.12f} {pos[1]:.12f} {pos[2]:.12f}\n"
+            )
+
+
+def read_lammps_forces(path, atom_count):
+    rows = []
+    in_atoms = False
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("ITEM: ATOMS"):
+                in_atoms = True
+                continue
+            if in_atoms:
+                if line.startswith("ITEM:"):
+                    break
+                parts = line.split()
+                if len(parts) >= 4:
+                    rows.append((int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])))
+    if len(rows) != atom_count:
+        raise SystemExit(f"Expected {atom_count} force rows in {path}, found {len(rows)}")
+    rows.sort(key=lambda row: row[0])
+    return np.asarray([[fx, fy, fz] for _, fx, fy, fz in rows], dtype=float)
+
+
+def iter_strided_frames(trajectory, frame_stride):
+    for source_index, atoms in enumerate(
+        iread(trajectory, index=":", format="lammps-dump-text")
+    ):
+        if source_index % frame_stride == 0:
+            atoms.info["source_frame_index"] = source_index
+            yield atoms
 
 
 def force_rrmse(forces):
@@ -176,30 +362,47 @@ def build_upet_calculator(model_dir, device):
 
     calculator_classes = []
 
+    import_errors = []
+
+    try:
+        from upet.calculator import UPETCalculator
+        calculator_classes.append(UPETCalculator)
+    except Exception as error:
+        import_errors.append(f"upet.calculator.UPETCalculator: {type(error).__name__}: {error}")
+
     for module_name, class_names in [
-        (
-            "metatomic.torch.ase_calculator",
-            ["MetatomicCalculator", "MetatensorCalculator"],
-        ),
         (
             "metatensor.torch.atomistic.ase_calculator",
             ["MetatensorCalculator"],
         ),
+        (
+            "metatomic.torch.ase_calculator",
+            ["MetatomicCalculator", "MetatensorCalculator"],
+        ),
     ]:
         try:
             module = __import__(module_name, fromlist=class_names)
-        except ImportError:
+
+            for class_name in class_names:
+                try:
+                    candidate = getattr(module, class_name)
+                except AttributeError:
+                    continue
+
+                calculator_classes.append(candidate)
+        except Exception as error:
+            import_errors.append(f"{module_name}: {type(error).__name__}: {error}")
             continue
 
-        for class_name in class_names:
-            if hasattr(module, class_name):
-                calculator_classes.append(getattr(module, class_name))
 
     if not calculator_classes:
-        raise SystemExit(
+        message = (
             "Could not import an UPET/metatomic ASE calculator. "
             "Install the UPET ASE interface or adapt build_upet_calculator()."
         )
+        if import_errors:
+            message += "\nImport attempts:\n" + "\n".join(import_errors)
+        raise SystemExit(message)
 
     errors = []
 
@@ -209,16 +412,18 @@ def build_upet_calculator(model_dir, device):
             {"model_path": model_path, "device": device},
             {"model": model_path},
             {"model_path": model_path},
+            {"path": model_path, "device": device},
+            {"checkpoint": model_path, "device": device},
         ]:
             try:
                 return calculator_class(**kwargs)
-            except TypeError as error:
-                errors.append(f"{calculator_class.__name__}{kwargs}: {error}")
+            except Exception as error:
+                errors.append(f"{calculator_class.__name__}{kwargs}: {type(error).__name__}: {error}")
 
         try:
             return calculator_class(model_path)
-        except TypeError as error:
-            errors.append(f"{calculator_class.__name__}({model_path}): {error}")
+        except Exception as error:
+            errors.append(f"{calculator_class.__name__}({model_path}): {type(error).__name__}: {error}")
 
     raise SystemExit(
         "Found an UPET/metatomic ASE calculator, but could not construct it:\n"

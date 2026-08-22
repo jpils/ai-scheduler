@@ -15,9 +15,18 @@ use super::{Pipeline, PipelineCtx};
 
 pub(crate) trait Runner {
     fn run(&self, pipeline: &Pipeline, pipeline_ctx: &PipelineCtx) -> Result<()> {
-        for step in pipeline.steps.iter() {
+        println!("[pipeline] generation {}: {} step(s)", pipeline_ctx.generation, pipeline.steps.len());
+        for (index, step) in pipeline.steps.iter().enumerate() {
+            println!(
+                "[pipeline] generation {} step {}/{}: {}",
+                pipeline_ctx.generation,
+                index + 1,
+                pipeline.steps.len(),
+                step.describe()
+            );
             self.run_step(step.as_ref(), pipeline_ctx)?;
         }
+        println!("[pipeline] generation {} complete", pipeline_ctx.generation);
         Ok(())
     }
 
@@ -28,24 +37,45 @@ pub(crate) struct SlurmRunner;
 
 impl Runner for SlurmRunner {
     fn run_step(&self, step: &dyn PipelineStep, pipeline_ctx: &PipelineCtx) -> Result<()> {
+        println!("[step:{}] validating required files", step.name());
         step.validate_required_files(pipeline_ctx)?;
+        println!("[step:{}] validation ok", step.name());
 
-        let StepPlan::Slurm(job_script) = step.prepare(pipeline_ctx)? else {
-            return Err(anyhow!(
-                "{} cannot run with SlurmRunner: step does not produce a Slurm job",
-                step.name()
-            ));
+        println!("[step:{}] preparing workspace/job", step.name());
+        let job_script = match step.prepare(pipeline_ctx)? {
+            StepPlan::LocalComplete => {
+                println!("[step:{}] completed locally during prepare", step.name());
+                let finished_data =
+                    synthetic_finished_data(JobScript::new(PathBuf::from("<local>")))?;
+                println!("[step:{}] running completion hook", step.name());
+                step.on_completion(&finished_data, pipeline_ctx)?;
+                println!("[step:{}] done", step.name());
+                return Ok(());
+            }
+            StepPlan::Slurm(job_script) => job_script,
         };
+        println!("[step:{}] job script: {}", step.name(), job_script.as_path().display());
 
         let mut job_id = slurm_client::submit(&job_script)?;
+        println!("[step:{}] submitted Slurm job {}", step.name(), job_id.as_str());
         let mut retry_count = 0;
 
         loop {
+            println!("[step:{}] waiting for job {}", step.name(), job_id.as_str());
             let finished_data = wait_for_job(&job_id, pipeline_ctx.poll_interval)?;
+            println!(
+                "[step:{}] job {} finished with {:?} after {}",
+                step.name(),
+                job_id.as_str(),
+                finished_data.final_status,
+                finished_data.runtime
+            );
 
             match finished_data.final_status {
                 FinalJobStatus::Completed => {
+                    println!("[step:{}] running completion hook", step.name());
                     step.on_completion(&finished_data, pipeline_ctx)?;
+                    println!("[step:{}] done", step.name());
                     return Ok(());
                 }
                 FinalJobStatus::Timeout if retry_count < pipeline_ctx.max_retries => {
